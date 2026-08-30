@@ -196,8 +196,9 @@ Given the baseline architecture, the query TDL package must provide:
 - A TDL task MUST return `TdlError::ExecutionError` for every configuration,
   process, or non-duplicate results-cache failure. It MUST NOT return a
   `QueryTaskOutput` unless clp-s exits successfully after completing its writes.
-- `begin_timestamp` and `end_timestamp` MUST use Unix epoch microseconds across
-  the shared wire type, TDL task, and clp-s `--tge` and `--tle` arguments.
+- `begin_timestamp_millisecs` and `end_timestamp_millisecs` MUST use Unix epoch
+  milliseconds across the shared wire type, TDL task, and clp-s `--tge` and
+  `--tle` arguments.
 
 ## 5. Constraints and assumptions
 
@@ -353,10 +354,10 @@ use serde::Serialize;
 pub struct ClpSQueryOption {
     pub query_string: String,
     pub max_num_results: NonZeroU32,
-    /// Inclusive lower bound, in Unix epoch microseconds.
-    pub begin_timestamp: Option<i64>,
-    /// Inclusive upper bound, in Unix epoch microseconds.
-    pub end_timestamp: Option<i64>,
+    /// Inclusive `--tge` bound in Unix epoch milliseconds.
+    pub begin_timestamp_millisecs: Option<i64>,
+    /// Inclusive `--tle` bound in Unix epoch milliseconds.
+    pub end_timestamp_millisecs: Option<i64>,
     pub ignore_case: bool,
 }
 
@@ -373,7 +374,7 @@ The scalar `query_job_id: i32` argument mirrors the signed MySQL `INT` type of
 zero; the coordinator resolves the API's zero-as-default convention before it
 constructs these inputs. When both timestamp bounds are present, the
 coordinator MUST reject a begin timestamp greater than the end timestamp.
-Timestamp bounds are inclusive Unix epoch microseconds.
+Timestamp bounds are inclusive Unix epoch milliseconds.
 
 The relationship to the existing compression wire types is:
 
@@ -415,8 +416,8 @@ datasets.
 | `archive_id` | `QueryCoordinator`, from the selected dataset's archive-metadata row | For filesystem storage, passed as `--archive-id <archive-id>`. For S3 storage, forms the final component of the archive object key. It also identifies the archive in task logs and result documents and is an input to the deterministic result `_id` defined by [Results-cache deduplication](results-cache-dedupe.md). |
 | `clp_s_query_option.query_string` | Query-job configuration | Passed as clp-s's positional query without reinterpretation by the TDL task. |
 | `clp_s_query_option.max_num_results` | Query-job configuration after zero-default normalization | Passed as `results-cache --max-num-results <n>`. The limit applies independently to this archive invocation. |
-| `clp_s_query_option.begin_timestamp` | Query-job configuration | Inclusive lower bound in Unix epoch microseconds. When present, passed unchanged as `--tge <microseconds>`; omitted otherwise. |
-| `clp_s_query_option.end_timestamp` | Query-job configuration | Inclusive upper bound in Unix epoch microseconds. When present, passed unchanged as `--tle <microseconds>`; omitted otherwise. |
+| `clp_s_query_option.begin_timestamp_millisecs` | Query-job configuration | Inclusive lower bound in Unix epoch milliseconds. When present, passed unchanged as `--tge <milliseconds>`; omitted otherwise. |
+| `clp_s_query_option.end_timestamp_millisecs` | Query-job configuration | Inclusive upper bound in Unix epoch milliseconds. When present, passed unchanged as `--tle <milliseconds>`; omitted otherwise. |
 | `clp_s_query_option.ignore_case` | Query-job configuration | Adds `--ignore-case` when true; adds no argument when false. |
 
 The task obtains `CLP_HOME`, `archive_output`, and `results_cache` from
@@ -434,8 +435,8 @@ For filesystem archives, the resulting command is:
 <CLP_HOME>/bin/clp-s s <archive-root>/<dataset>
     --archive-id <archive-id>
     <query-string>
-    [--tge <begin-us>]
-    [--tle <end-us>]
+    [--tge <begin-ms>]
+    [--tle <end-ms>]
     [--ignore-case]
     results-cache
     --uri <results-cache-uri>
@@ -451,13 +452,11 @@ For S3 archives, the archive locator is instead:
 ```
 
 The query and result-cache arguments following that locator are unchanged. The
-clp-s command contract MUST interpret `--tge` and `--tle` as Unix epoch
-microseconds. The TDL task passes the signed values unchanged and MUST NOT
-convert them to milliseconds. The shared type, TDL implementation, and clp-s
-CLI implementation MUST be updated together; interpreting these values as
-milliseconds violates this contract. `--tge` means timestamp greater than or
-equal to the inclusive lower bound; `--tle` means timestamp less than or equal
-to the inclusive upper bound.
+clp-s command contract interprets `--tge` and `--tle` as Unix epoch
+milliseconds. The TDL task MUST pass the signed values unchanged without
+rescaling them. `--tge` means timestamp greater than or equal to the inclusive
+lower bound; `--tle` means timestamp less than or equal to the inclusive upper
+bound.
 
 The implementation MUST construct the argument vector without a shell, wait for
 the child process, and drain its standard streams. Exit code zero returns
