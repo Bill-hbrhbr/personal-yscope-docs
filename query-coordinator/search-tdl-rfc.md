@@ -267,17 +267,24 @@ Spider graph
   clp_s_search(dataset-b, archive-3) --+
 ```
 
-**Shared task input types.** The signature in Section 6.1 uses the following
-MessagePack-serialized types from
+**Shared query-job identifier.** The signature uses `QueryJobId` from
+`clp_rust_utils::job_config`, matching the compression side's
+`CompressionJobId` pattern:
+
+```rust
+pub type QueryJobId = i32;
+```
+
+**Shared task input types.** The signature in Section 6.1 also uses the
+following MessagePack-serialized types from
 `clp_rust_utils::task_io::search`:
 
 ```rust
 use std::num::NonZeroU32;
 
+use crate::job_config::QueryJobId;
 use serde::Deserialize;
 use serde::Serialize;
-
-pub type QueryJobId = i32;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchQuery {

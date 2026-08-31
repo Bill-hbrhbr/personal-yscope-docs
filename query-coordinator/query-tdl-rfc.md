@@ -341,8 +341,15 @@ that graph node.
 
 ### 6.2 Shared task I/O types
 
-The signature in Section 6.3 uses the following MessagePack-serialized types
-from `clp_rust_utils::task_io::query`:
+The signature in Section 6.3 uses the following query-job identifier from
+`clp_rust_utils::job_config`:
+
+```rust
+pub type QueryJobId = i32;
+```
+
+It also uses the following MessagePack-serialized types from
+`clp_rust_utils::task_io::query`:
 
 ```rust
 use std::num::NonZeroU32;
@@ -368,8 +375,8 @@ pub struct QueryTaskOutput {
 }
 ```
 
-The scalar `query_job_id: i32` argument mirrors the signed MySQL `INT` type of
-`query_jobs.id`.
+`QueryJobId` mirrors the signed MySQL `INT` type of `query_jobs.id`, matching
+the compression side's `CompressionJobId` pattern.
 `max_num_results` is non-zero because the clp-s result-cache handler rejects
 zero; the coordinator resolves the API's zero-as-default convention before it
 constructs these inputs. When both timestamp bounds are present, the
@@ -380,6 +387,7 @@ The relationship to the existing compression wire types is:
 
 | Query type | Role | Compression-side analogue |
 | --- | --- | --- |
+| `QueryJobId` | Identifies the durable query job and its MongoDB collection. | `CompressionJobId` identifies the durable compression job. |
 | `ClpSQueryOption` | Job-wide native query options copied into every archive-task payload. | `ClpSCompressionOption` contains job-wide native compression options copied into every compression-task payload. |
 | `QueryTaskOutput` | Identifies the dataset and archive whose query invocation completed. It does not contain query results. | `CompressionTaskOutput` contains newly created archive metadata that must be published by `compression::commit`. |
 
@@ -395,7 +403,7 @@ clp-s, and no task consumes `QueryTaskOutput` in the MVP.
 #[task(name = "query::clp_s_query_to_results_cache")]
 pub(crate) fn clp_s_query_to_results_cache_task(
     ctx: TaskContext,
-    query_job_id: i32,
+    query_job_id: QueryJobId,
     clp_s_query_option: ClpSQueryOption,
     dataset: String,
     archive_id: String,
