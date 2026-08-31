@@ -264,15 +264,19 @@ Preprocessing happens before any TDL function is invoked:
 
 1. `QueryCoordinator` deserializes and validates `QueryJobConfig` and accepts
    only jobs for the CLP-S storage engine.
-2. The coordinator resolves a missing dataset selection
-   to `default`, deduplicates and validates the selected datasets, and queries
-   their archive-metadata tables. When more than one dataset is selected, it
-   combines the per-dataset `SELECT` statements with `UNION ALL`, includes the
-   dataset name with every selected row, and globally orders the rows by
+2. The coordinator interprets a missing dataset selection as the default
+   dataset, deduplicates and validates explicitly selected datasets, and
+   queries their archive-metadata tables. It may preserve the missing
+   selection as `None` in the task input; `None` is the wire representation of
+   the default dataset. When more than one dataset is selected, it combines
+   the per-dataset `SELECT` statements with `UNION ALL`, includes the dataset
+   name with every selected row, and globally orders the rows by
    `end_timestamp DESC`.
 3. The coordinator applies the query time range and archive-retention cutoff
    while selecting archives. The resulting in-memory mapping has one
-   `(dataset, archive_id)` entry per matching archive.
+   `(Option<NonEmptyString>, NonEmptyString)` dataset/archive pair per matching
+   archive. `None` denotes the default dataset; `Some(dataset)` denotes an
+   explicitly named dataset.
 4. `QueryCoordinator` gives the prepared inputs to `QueryJobHandle`, which
    calls the `QueryJobSubmitter` trait. In production, the trait implementation
    for `SpiderClient` creates one graph node per input and serializes that input
@@ -288,12 +292,12 @@ Preprocessing happens before any TDL function is invoked:
 
 The planning-time SQL `UNION ALL` combines only archive-metadata rows from the
 selected datasets; it does not combine query results. The coordinator flattens
-the selected rows into one ordered `Vec<(dataset, archive_id)>`, and the
+the selected rows into one ordered vector of dataset/archive pairs, and the
 submitter creates one logical graph node from each pair. A node receives only
-its scalar `dataset` and `archive_id`, never the complete vector or a
-dataset-to-archives map. The result-level union is the per-query MongoDB
-collection: every node writes to collection `<query_job_id>` and records its
-dataset in each result document.
+its optional scalar `dataset` and non-empty `archive_id`, never the complete
+vector or a dataset-to-archives map. The result-level union is the per-query
+MongoDB collection: every node writes to collection `<query_job_id>` and
+records the resolved dataset name in each result document.
 
 #### 6.1.3 Graph shape
 
@@ -354,12 +358,13 @@ It also uses the following MessagePack-serialized types from
 ```rust
 use std::num::NonZeroU32;
 
+use non_empty_string::NonEmptyString;
 use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ClpSQueryOption {
-    pub query_string: String,
+    pub query_string: NonEmptyString,
     pub max_num_results: NonZeroU32,
     /// Inclusive `--tge` bound in Unix epoch milliseconds.
     pub begin_timestamp_millisecs: Option<i64>,
@@ -370,8 +375,8 @@ pub struct ClpSQueryOption {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QueryTaskOutput {
-    pub dataset: String,
-    pub archive_id: String,
+    pub dataset: NonEmptyString,
+    pub archive_id: NonEmptyString,
 }
 ```
 
@@ -382,6 +387,10 @@ zero; the coordinator resolves the API's zero-as-default convention before it
 constructs these inputs. When both timestamp bounds are present, the
 coordinator MUST reject a begin timestamp greater than the end timestamp.
 Timestamp bounds are inclusive Unix epoch milliseconds.
+`NonEmptyString` prevents an empty query, dataset name, or archive ID from
+crossing the MessagePack task boundary. It rejects only a zero-length string;
+the coordinator remains responsible for any stricter query or dataset
+validation.
 
 The relationship to the existing compression wire types is:
 
@@ -405,11 +414,13 @@ MUST remain separate:
   value into every archive node. Its fields determine what clp-s searches for
   and how it evaluates the query: query string, result limit, time bounds, and
   case sensitivity.
-- `dataset` and `archive_id` are **per-node archive context**. The coordinator
-  obtains them from archive selection, and each graph node receives the pair
-  identifying the one archive that it must search. Nodes in the same query
-  graph share one `ClpSQueryOption` but may have different datasets and always
-  have independently selected archive IDs.
+- `dataset: Option<NonEmptyString>` and `archive_id: NonEmptyString` are
+  **per-node archive context**. The coordinator obtains them from archive
+  selection, and each graph node receives the pair identifying the one archive
+  that it must search. `None` means the default dataset; `Some(dataset)` names
+  an explicit dataset. Nodes in the same query graph share one
+  `ClpSQueryOption` but may have different datasets and always have
+  independently selected archive IDs.
 
 `dataset` therefore MUST NOT be added to `ClpSQueryOption`. It does not change
 query matching semantics; it locates the selected archive and labels that
@@ -437,16 +448,17 @@ pub(crate) fn clp_s_query_to_results_cache_task(
     ctx: TaskContext,
     query_job_id: QueryJobId,
     clp_s_query_option: ClpSQueryOption,
-    dataset: String,
-    archive_id: String,
+    dataset: Option<NonEmptyString>,
+    archive_id: NonEmptyString,
 ) -> Result<QueryTaskOutput, TdlError>;
 ```
 
 The task executes exactly one clp-s query against exactly one archive in one
 resolved dataset. `clp_s_query_option` is the job-wide search behavior;
-`dataset` and `archive_id` identify the per-node archive target. Different
-invocations in the same graph reuse the same options but may use different
-datasets and archive IDs.
+`dataset` and `archive_id` identify the per-node archive target. The task
+resolves `dataset: None` to `default` before constructing the archive locator
+or clp-s arguments. Different invocations in the same graph reuse the same
+options but may use different datasets and archive IDs.
 
 #### 6.3.2 Inputs and exact uses
 
@@ -454,9 +466,9 @@ datasets and archive IDs.
 | --- | --- | --- |
 | `ctx` | Spider | Supplies Spider job, task, and task-instance identities for tracing and error context. `ctx.job_id` MUST NOT replace the query-job ID. |
 | `query_job_id` | `QueryCoordinator`, copied into every archive input for the query job | Converted to its decimal string and passed as `results-cache --collection <query_job_id>`. Every archive task in the graph therefore writes to the same per-query MongoDB collection. |
-| `dataset` | `QueryCoordinator`, from the archive-selection row after default resolution and validation | Per-node archive context, not a field of `ClpSQueryOption`. For filesystem storage, selects `<archive-root>/<dataset>` and is also passed as `results-cache --dataset <dataset>`. For S3 storage, forms the object key `<key-prefix><dataset>/<archive-id>` and is also passed through `--dataset` so each MongoDB result records its dataset. |
-| `archive_id` | `QueryCoordinator`, from the selected dataset's archive-metadata row | Per-node archive context paired with `dataset`. For filesystem storage, passed as `--archive-id <archive-id>`. For S3 storage, forms the final component of the archive object key. It also identifies the archive in task logs and result documents and is an input to the deterministic result `_id` defined by [Results-cache deduplication](results-cache-dedupe.md). |
-| `clp_s_query_option.query_string` | Query-job configuration | Passed as clp-s's positional query without reinterpretation by the TDL task. |
+| `dataset` | `QueryCoordinator`, from the archive selection | Optional, non-empty per-node archive context, not a field of `ClpSQueryOption`. The task calls `clp_rust_utils::dataset::resolve_dataset_name(dataset.as_deref())`, so `None` becomes `default`. For filesystem storage, the resolved name selects `<archive-root>/<dataset>` and is passed as `results-cache --dataset <dataset>`. For S3 storage, it forms `<key-prefix><dataset>/<archive-id>` and is passed through `--dataset` so every MongoDB result records a non-empty dataset. |
+| `archive_id` | `QueryCoordinator`, from the selected dataset's archive-metadata row | Non-empty per-node archive context paired with `dataset`. For filesystem storage, passed as `--archive-id <archive-id>`. For S3 storage, forms the final component of the archive object key. It also identifies the archive in task logs and result documents and is an input to the deterministic result `_id` defined by [Results-cache deduplication](results-cache-dedupe.md). |
+| `clp_s_query_option.query_string` | Query-job configuration | A non-empty string passed as clp-s's positional query without reinterpretation by the TDL task. |
 | `clp_s_query_option.max_num_results` | Query-job configuration after zero-default normalization | Passed as `results-cache --max-num-results <n>`. The limit applies independently to this archive invocation. |
 | `clp_s_query_option.begin_timestamp_millisecs` | Query-job configuration | Inclusive lower bound in Unix epoch milliseconds. When present, passed unchanged as `--tge <milliseconds>`; omitted otherwise. |
 | `clp_s_query_option.end_timestamp_millisecs` | Query-job configuration | Inclusive upper bound in Unix epoch milliseconds. When present, passed unchanged as `--tle <milliseconds>`; omitted otherwise. |
@@ -502,13 +514,16 @@ bound.
 
 The implementation MUST construct the argument vector without a shell, wait for
 the child process, and drain its standard streams. Exit code zero returns
-`Ok(QueryTaskOutput { dataset, archive_id })`; a configuration, credential,
-URL-construction, spawn/wait, or non-zero-exit failure returns
+`Ok(QueryTaskOutput { dataset: resolved_dataset, archive_id })`; a
+configuration, credential, URL-construction, spawn/wait, or non-zero-exit
+failure returns
 `TdlError::ExecutionError`. Zero matching log events is successful.
 
 #### 6.3.3 Outputs and their consumers
 
-**Returned task output:** `QueryTaskOutput { dataset, archive_id }`. The output
+**Returned task output:**
+`QueryTaskOutput { dataset: resolved_dataset, archive_id }`. The dataset is the
+non-empty result of resolving an absent input to `default`. The output
 identifies the successfully processed archive but contains no query results or
 result statistics. No downstream task consumes it in the MVP, and the query
 job handler does not use it to infer graph success.
