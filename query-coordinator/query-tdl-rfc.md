@@ -388,12 +388,44 @@ The relationship to the existing compression wire types is:
 | Query type | Role | Compression-side analogue |
 | --- | --- | --- |
 | `QueryJobId` | Identifies the durable query job and its MongoDB collection. | `CompressionJobId` identifies the durable compression job. |
-| `ClpSQueryOption` | Job-wide native query options copied into every archive-task payload. | `ClpSCompressionOption` contains job-wide native compression options copied into every compression-task payload. |
+| `ClpSQueryOption` | Job-wide clp-s query behavior copied unchanged into every archive-task payload. Its fields control how clp-s evaluates the query; it does not identify which archive or dataset a node searches. | `ClpSCompressionOption` contains job-wide native compression options copied into every compression-task payload. |
 | `QueryTaskOutput` | Identifies the dataset and archive whose query invocation completed. It does not contain query results. | `CompressionTaskOutput` contains newly created archive metadata that must be published by `compression::commit`. |
 
 Unlike `CompressionTaskOutput`, `QueryTaskOutput` does not describe data that a
 later task must publish. Query results are already persisted in MongoDB by
 clp-s, and no task consumes `QueryTaskOutput` in the MVP.
+
+#### 6.2.1 Query options versus archive-task context
+
+`ClpSQueryOption` and the task's `dataset` argument have different scopes and
+MUST remain separate:
+
+- `ClpSQueryOption` is **job-wide query behavior**. The coordinator constructs
+  it once from the query-job configuration, and the submitter copies the same
+  value into every archive node. Its fields determine what clp-s searches for
+  and how it evaluates the query: query string, result limit, time bounds, and
+  case sensitivity.
+- `dataset` and `archive_id` are **per-node archive context**. The coordinator
+  obtains them from archive selection, and each graph node receives the pair
+  identifying the one archive that it must search. Nodes in the same query
+  graph share one `ClpSQueryOption` but may have different datasets and always
+  have independently selected archive IDs.
+
+`dataset` therefore MUST NOT be added to `ClpSQueryOption`. It does not change
+query matching semantics; it locates the selected archive and labels that
+archive's MongoDB result documents. Keeping it as a separate task argument also
+makes the task payload's two parts explicit:
+
+```text
+job-wide behavior:     ClpSQueryOption
+per-archive context:   dataset + archive_id
+```
+
+For example, a query graph containing `(dataset-a, archive-1)` and
+`(dataset-b, archive-2)` sends the same `ClpSQueryOption` to both nodes, while
+each node receives its own `dataset` and `archive_id`. Putting `dataset` inside
+`ClpSQueryOption` would incorrectly imply that this per-node routing value is a
+job-wide clp-s query option.
 
 ### 6.3 `query::clp_s_query_to_results_cache`
 
@@ -411,8 +443,10 @@ pub(crate) fn clp_s_query_to_results_cache_task(
 ```
 
 The task executes exactly one clp-s query against exactly one archive in one
-resolved dataset. Different invocations in the same graph may use different
-datasets.
+resolved dataset. `clp_s_query_option` is the job-wide search behavior;
+`dataset` and `archive_id` identify the per-node archive target. Different
+invocations in the same graph reuse the same options but may use different
+datasets and archive IDs.
 
 #### 6.3.2 Inputs and exact uses
 
@@ -420,8 +454,8 @@ datasets.
 | --- | --- | --- |
 | `ctx` | Spider | Supplies Spider job, task, and task-instance identities for tracing and error context. `ctx.job_id` MUST NOT replace the query-job ID. |
 | `query_job_id` | `QueryCoordinator`, copied into every archive input for the query job | Converted to its decimal string and passed as `results-cache --collection <query_job_id>`. Every archive task in the graph therefore writes to the same per-query MongoDB collection. |
-| `dataset` | `QueryCoordinator`, from the archive-selection row after default resolution and validation | For filesystem storage, selects `<archive-root>/<dataset>` and is also passed as `results-cache --dataset <dataset>`. For S3 storage, forms the object key `<key-prefix><dataset>/<archive-id>` and is also passed through `--dataset` so each MongoDB result records its dataset. |
-| `archive_id` | `QueryCoordinator`, from the selected dataset's archive-metadata row | For filesystem storage, passed as `--archive-id <archive-id>`. For S3 storage, forms the final component of the archive object key. It also identifies the archive in task logs and result documents and is an input to the deterministic result `_id` defined by [Results-cache deduplication](results-cache-dedupe.md). |
+| `dataset` | `QueryCoordinator`, from the archive-selection row after default resolution and validation | Per-node archive context, not a field of `ClpSQueryOption`. For filesystem storage, selects `<archive-root>/<dataset>` and is also passed as `results-cache --dataset <dataset>`. For S3 storage, forms the object key `<key-prefix><dataset>/<archive-id>` and is also passed through `--dataset` so each MongoDB result records its dataset. |
+| `archive_id` | `QueryCoordinator`, from the selected dataset's archive-metadata row | Per-node archive context paired with `dataset`. For filesystem storage, passed as `--archive-id <archive-id>`. For S3 storage, forms the final component of the archive object key. It also identifies the archive in task logs and result documents and is an input to the deterministic result `_id` defined by [Results-cache deduplication](results-cache-dedupe.md). |
 | `clp_s_query_option.query_string` | Query-job configuration | Passed as clp-s's positional query without reinterpretation by the TDL task. |
 | `clp_s_query_option.max_num_results` | Query-job configuration after zero-default normalization | Passed as `results-cache --max-num-results <n>`. The limit applies independently to this archive invocation. |
 | `clp_s_query_option.begin_timestamp_millisecs` | Query-job configuration | Inclusive lower bound in Unix epoch milliseconds. When present, passed unchanged as `--tge <milliseconds>`; omitted otherwise. |
