@@ -365,7 +365,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ClpSQueryOption {
     pub query_string: NonEmptyString,
-    pub max_num_results: NonZeroU32,
+    pub max_num_results: Option<NonZeroU32>,
     /// Inclusive `--tge` bound in Unix epoch milliseconds.
     pub begin_timestamp_millisecs: Option<i64>,
     /// Inclusive `--tle` bound in Unix epoch milliseconds.
@@ -382,11 +382,15 @@ pub struct QueryTaskOutput {
 
 `QueryJobId` mirrors the signed MySQL `INT` type of `query_jobs.id`, matching
 the compression side's `CompressionJobId` pattern.
-`max_num_results` is non-zero because the clp-s result-cache handler rejects
-zero; the coordinator resolves the API's zero-as-default convention before it
-constructs these inputs. When both timestamp bounds are present, the
-coordinator MUST reject a begin timestamp greater than the end timestamp.
-Timestamp bounds are inclusive Unix epoch milliseconds.
+When `max_num_results` is present, its value is non-zero because the clp-s
+result-cache handler rejects zero. When it is absent, the TDL task uses
+`clp_rust_utils::clp_config::package::config::DEFAULT_MAX_NUM_QUERY_RESULTS`.
+This shared constant is also used by `ApiServer::default()` and is the single
+Rust source of truth for the default value. `None` does not mean unlimited. The
+task always passes the resolved value through `--max-num-results`; it MUST NOT
+rely on clp-s's native command-line default. When both timestamp bounds are
+present, the coordinator MUST reject a begin timestamp greater than the end
+timestamp. Timestamp bounds are inclusive Unix epoch milliseconds.
 `NonEmptyString` prevents an empty query, dataset name, or archive ID from
 crossing the MessagePack task boundary. It rejects only a zero-length string;
 the coordinator remains responsible for any stricter query or dataset
@@ -469,7 +473,7 @@ options but may use different datasets and archive IDs.
 | `dataset` | `QueryCoordinator`, from the archive selection | Optional, non-empty per-node archive context, not a field of `ClpSQueryOption`. The task calls `clp_rust_utils::dataset::resolve_dataset_name(dataset.as_deref())`, so `None` becomes `default`. For filesystem storage, the resolved name selects `<archive-root>/<dataset>` and is passed as `results-cache --dataset <dataset>`. For S3 storage, it forms `<key-prefix><dataset>/<archive-id>` and is passed through `--dataset` so every MongoDB result records a non-empty dataset. |
 | `archive_id` | `QueryCoordinator`, from the selected dataset's archive-metadata row | Non-empty per-node archive context paired with `dataset`. For filesystem storage, passed as `--archive-id <archive-id>`. For S3 storage, forms the final component of the archive object key. It also identifies the archive in task logs and result documents and is an input to the deterministic result `_id` defined by [Results-cache deduplication](results-cache-dedupe.md). |
 | `clp_s_query_option.query_string` | Query-job configuration | A non-empty string passed as clp-s's positional query without reinterpretation by the TDL task. |
-| `clp_s_query_option.max_num_results` | Query-job configuration after zero-default normalization | Passed as `results-cache --max-num-results <n>`. The limit applies independently to this archive invocation. |
+| `clp_s_query_option.max_num_results` | Query-job configuration | When `Some(n)`, uses `n`. When `None`, uses `DEFAULT_MAX_NUM_QUERY_RESULTS` from `clp-rust-utils`; `None` does not mean unlimited. The task always passes the resolved value as `results-cache --max-num-results <n>`. The resulting limit applies independently to this archive invocation. |
 | `clp_s_query_option.begin_timestamp_millisecs` | Query-job configuration | Inclusive lower bound in Unix epoch milliseconds. When present, passed unchanged as `--tge <milliseconds>`; omitted otherwise. |
 | `clp_s_query_option.end_timestamp_millisecs` | Query-job configuration | Inclusive upper bound in Unix epoch milliseconds. When present, passed unchanged as `--tle <milliseconds>`; omitted otherwise. |
 | `clp_s_query_option.ignore_case` | Query-job configuration | Adds `--ignore-case` when true; adds no argument when false. |
