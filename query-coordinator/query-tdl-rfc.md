@@ -14,9 +14,12 @@ The MVP covers only plain CLP-S queries using the results-cache output path:
 - **CLP-S only.** The MVP supports archives produced by the CLP-S storage
   engine and invokes `clp-s` to query them. The legacy CLP storage engine,
   `clo`, and all other storage engines are outside the MVP scope.
-- **Result-cache only.** clp-s writes query results directly
-  to MongoDB through its `results-cache` output handler. The `network` and
-  `file` output handlers are outside the MVP scope.
+- **Result-cache only.** The MVP will use clp-s's `results-cache` output handler
+  to write query results directly to MongoDB. The task signature reserves an
+  explicit `OutputHandle` argument for selecting the handler, but the current
+  contract leaves that enum empty until the task implementation defines its
+  concrete variant. The `network` and `file` output handlers are outside the
+  MVP scope.
 - **No aggregation.** The MVP does not support a reducer or any
   count/count-by-time/min/max/unique aggregation. An accepted query job has no
   aggregation configuration.
@@ -99,8 +102,7 @@ Spider.
 Spider owns distributed graph execution:
 
 - Schedule graph nodes on available workers.
-- Run one `query::clp_s_query_to_results_cache` task for each planned
-  archive.
+- Run one `query::clp_s_search` task for each planned archive.
 - Apply each node's retry, concurrency, and timeout policy.
 - Expose the Spider job's state and error to the submitter.
 
@@ -108,8 +110,8 @@ Spider owns distributed graph execution:
 
 The TDL package defines how each graph node executes:
 
-- `query::clp_s_query_to_results_cache` interprets one CLP-S
-  dataset/archive input and launches clp-s.
+- `query::clp_s_search` interprets one CLP-S dataset/archive input and launches
+  clp-s.
 - clp-s writes matches directly to MongoDB collection
   `<query_job_id>`; the archive task returns no application data and reports
   only execution success or failure to Spider.
@@ -223,7 +225,7 @@ Given the baseline architecture, the query TDL package must provide:
 The MVP defines one Spider-visible task function:
 
 ```text
-query::clp_s_query_to_results_cache
+query::clp_s_search
 ```
 
 ### 6.1 Task graph
@@ -236,7 +238,7 @@ TDL argument. The initial MVP policies are:
 
 | Task | `max_num_instances` | `max_num_retry` | Soft / hard timeout | Rationale |
 | --- | ---: | ---: | ---: | --- |
-| `query::clp_s_query_to_results_cache` | 2 | 1 | 600 s / 1,200 s | Allows Spider to start at most one replacement instance after a failure or soft timeout. Re-execution is safe only because the results-cache writer follows the idempotency contract in [Results-cache deduplication](results-cache-dedupe.md). |
+| `query::clp_s_search` | 2 | 1 | 600 s / 1,200 s | Allows Spider to start at most one replacement instance after a failure or soft timeout. Re-execution is safe only because the results-cache writer follows the idempotency contract in [Results-cache deduplication](results-cache-dedupe.md). |
 
 The timeout and retry values MUST be coordinator configuration rendered into
 the deployment configuration rather than constants in the TDL functions.
@@ -263,7 +265,10 @@ group.
 Preprocessing happens before any TDL function is invoked:
 
 1. `QueryCoordinator` deserializes and validates `QueryJobConfig` and accepts
-   only jobs for the CLP-S storage engine.
+   only jobs for the CLP-S storage engine. It constructs the job-wide
+   `ClpSQueryOption` once. After the TDL implementation defines a concrete
+   results-cache variant, the coordinator will also construct one `OutputHandle`
+   and copy it into every archive task.
 2. The coordinator interprets a missing dataset selection as the default
    dataset, deduplicates and validates explicitly selected datasets, and
    queries their archive-metadata tables. It may preserve the missing
@@ -294,24 +299,25 @@ The planning-time SQL `UNION ALL` combines only archive-metadata rows from the
 selected datasets; it does not combine query results. The coordinator flattens
 the selected rows into one ordered vector of dataset/archive pairs, and the
 submitter creates one logical graph node from each pair. A node receives only
-its optional scalar `dataset` and non-empty `archive_id`, never the complete
-vector or a dataset-to-archives map. The result-level union is the per-query
+its optional scalar `dataset` and non-empty `archive_id` alongside the job-wide
+`ClpSQueryOption` and `OutputHandle`, never the complete vector or a
+dataset-to-archives map. The result-level union is the per-query
 MongoDB collection: every node writes to collection `<query_job_id>` and
 records the resolved dataset name in each result document.
 
 #### 6.1.3 Graph shape
 
 Each `(dataset, archive_id)` entry produced by preprocessing becomes one
-independent `query::clp_s_query_to_results_cache` node. The graph contains no
-join or commit task. The following diagram shows the graph shape for three
-archives selected from two datasets:
+independent `query::clp_s_search` node. The graph contains no join or commit
+task. The following diagram shows the graph shape for three archives selected
+from two datasets:
 
 ```mermaid
 flowchart LR
     subgraph task_graph["Spider task graph"]
-        Q1["query::clp_s_query_to_results_cache<br/>dataset-a, archive-1"]
-        Q2["query::clp_s_query_to_results_cache<br/>dataset-a, archive-2"]
-        Q3["query::clp_s_query_to_results_cache<br/>dataset-b, archive-3"]
+        Q1["query::clp_s_search<br/>dataset-a, archive-1"]
+        Q2["query::clp_s_search<br/>dataset-a, archive-2"]
+        Q3["query::clp_s_search<br/>dataset-b, archive-3"]
     end
 
     RC[("MongoDB results-cache<br/>collection = query_job_id")]
@@ -371,23 +377,45 @@ pub struct ClpSQueryOption {
     pub end_timestamp_millisecs: Option<i64>,
     pub ignore_case: bool,
 }
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum OutputHandle {
+}
 ```
 
 `QueryJobId` mirrors the signed MySQL `INT` type of `query_jobs.id`, matching
 the compression side's `CompressionJobId` pattern.
 When `max_num_results` is present, its value is non-zero because the clp-s
-result-cache handler rejects zero. When it is absent, the TDL task uses
-`clp_rust_utils::clp_config::package::config::DEFAULT_MAX_NUM_QUERY_RESULTS`.
-This shared constant is also used by `ApiServer::default()` and is the single
-Rust source of truth for the default value. `None` does not mean unlimited. The
-task always passes the resolved value through `--max-num-results`; it MUST NOT
-rely on clp-s's native command-line default. When both timestamp bounds are
-present, the coordinator MUST reject a begin timestamp greater than the end
-timestamp. Timestamp bounds are inclusive Unix epoch milliseconds.
+result-cache handler rejects zero. When it is absent, the task omits
+`--max-num-results` and uses clp-s's default. The task contract does not copy
+that default value. When both timestamp bounds are present, the coordinator
+MUST reject a begin timestamp greater than the end timestamp. Timestamp bounds
+are inclusive Unix epoch milliseconds.
 `NonEmptyString` prevents an empty query, dataset name, or archive ID from
 crossing the MessagePack task boundary. It rejects only a zero-length string;
 the coordinator remains responsible for any stricter query or dataset
 validation.
+
+`OutputHandle` reserves the shared wire type that will select the clp-s output
+handler. Its current definition is intentionally empty, so the current contract
+does not yet define or serialize any output-handler choice. Concrete variants
+belong to the task implementation PR.
+
+For illustration only, a future definition could contain variants such as:
+
+```rust
+pub enum OutputHandle {
+    ResultsCache,
+    File,
+    Network,
+}
+```
+
+This example is theoretical: it does not register these variants, prescribe
+their payloads, or bring file and network output into the MVP. The initial
+implementation is expected to add only the variant needed for the results-cache
+path. Keeping handler selection outside the task name allows future handlers to
+be added without renaming the Spider-visible search task.
 
 The relationship to the existing compression wire types is:
 
@@ -395,6 +423,7 @@ The relationship to the existing compression wire types is:
 | --- | --- | --- |
 | `QueryJobId` | Identifies the durable query job and its MongoDB collection. | `CompressionJobId` identifies the durable compression job. |
 | `ClpSQueryOption` | Job-wide clp-s query behavior copied unchanged into every archive-task payload. Its fields control how clp-s evaluates the query; it does not identify which archive or dataset a node searches. | `ClpSCompressionOption` contains job-wide native compression options copied into every compression-task payload. |
+| `OutputHandle` | Reserved job-wide selection of the clp-s output handler. The current enum has no variants; the task implementation will define the initial results-cache choice. | No analogue. A compression task always writes archives to the configured archive output. |
 
 There is no query-side analogue of `CompressionTaskOutput`.
 `CompressionTaskOutput` carries archive metadata into `compression::commit`,
@@ -403,59 +432,68 @@ the results in MongoDB, and Spider needs only the node's success or failure.
 
 #### 6.2.1 Query options versus archive-task context
 
-`ClpSQueryOption` and the task's `dataset` argument have different scopes and
-MUST remain separate:
+`ClpSQueryOption`, `OutputHandle`, and the task's `dataset` argument have
+different scopes and MUST remain separate:
 
 - `ClpSQueryOption` is **job-wide query behavior**. The coordinator constructs
   it once from the query-job configuration, and the submitter copies the same
   value into every archive node. Its fields determine what clp-s searches for
   and how it evaluates the query: query string, result limit, time bounds, and
   case sensitivity.
+- `OutputHandle` is the **reserved job-wide result destination**. Once concrete
+  variants are defined, one value will be constructed and copied into every
+  archive node. It selects where clp-s writes results rather than how clp-s
+  evaluates the query. The current empty enum records this ownership boundary
+  without yet specifying a handler.
 - `dataset: Option<NonEmptyString>` and `archive_id: NonEmptyString` are
   **per-node archive context**. The coordinator obtains them from archive
   selection, and each graph node receives the pair identifying the one archive
   that it must search. `None` means the default dataset; `Some(dataset)` names
   an explicit dataset. Nodes in the same query graph share one
-  `ClpSQueryOption` but may have different datasets and always have
-  independently selected archive IDs.
+  `ClpSQueryOption` and one `OutputHandle` but may have different datasets
+  and always have independently selected archive IDs.
 
 `dataset` therefore MUST NOT be added to `ClpSQueryOption`. It does not change
 query matching semantics; it locates the selected archive and labels that
 archive's MongoDB result documents. Keeping it as a separate task argument also
-makes the task payload's two parts explicit:
+makes the task payload's three parts explicit:
 
 ```text
 job-wide behavior:     ClpSQueryOption
+job-wide destination:  OutputHandle
 per-archive context:   dataset + archive_id
 ```
 
 For example, a query graph containing `(dataset-a, archive-1)` and
-`(dataset-b, archive-2)` sends the same `ClpSQueryOption` to both nodes, while
-each node receives its own `dataset` and `archive_id`. Putting `dataset` inside
-`ClpSQueryOption` would incorrectly imply that this per-node routing value is a
-job-wide clp-s query option.
+`(dataset-b, archive-2)` sends the same `ClpSQueryOption` and
+`OutputHandle` to both nodes, while each node receives its own `dataset`
+and `archive_id`. Putting `dataset` inside `ClpSQueryOption` would incorrectly
+imply that this per-node routing value is a job-wide clp-s query option.
 
-### 6.3 `query::clp_s_query_to_results_cache`
+### 6.3 `query::clp_s_search`
 
 #### 6.3.1 Signature
 
 ```rust
-#[task(name = "query::clp_s_query_to_results_cache")]
-pub(crate) fn clp_s_query_to_results_cache_task(
+#[task(name = "query::clp_s_search")]
+pub(crate) fn clp_s_search_task(
     ctx: TaskContext,
     query_job_id: QueryJobId,
     clp_s_query_option: ClpSQueryOption,
     dataset: Option<NonEmptyString>,
     archive_id: NonEmptyString,
+    output_handle: OutputHandle,
 ) -> Result<(), TdlError>;
 ```
 
 The task executes exactly one clp-s query against exactly one archive in one
 resolved dataset. `clp_s_query_option` is the job-wide search behavior;
-`dataset` and `archive_id` identify the per-node archive target. The task
-resolves `dataset: None` to `default` before constructing the archive locator
-or clp-s arguments. Different invocations in the same graph reuse the same
-options but may use different datasets and archive IDs.
+`dataset` and `archive_id` identify the per-node archive target;
+`output_handle` selects the clp-s output handler that receives the
+results. The task resolves `dataset: None` to `default` before constructing the
+archive locator or clp-s arguments. Different invocations in the same graph
+reuse the same options and output handle but may use different datasets and
+archive IDs.
 
 #### 6.3.2 Inputs and exact uses
 
@@ -466,10 +504,11 @@ options but may use different datasets and archive IDs.
 | `dataset` | `QueryCoordinator`, from the archive selection | Optional, non-empty per-node archive context, not a field of `ClpSQueryOption`. The task calls `clp_rust_utils::dataset::resolve_dataset_name(dataset.as_deref())`, so `None` becomes `default`. For filesystem storage, the resolved name selects `<archive-root>/<dataset>` and is passed as `results-cache --dataset <dataset>`. For S3 storage, it forms `<key-prefix><dataset>/<archive-id>` and is passed through `--dataset` so every MongoDB result records a non-empty dataset. |
 | `archive_id` | `QueryCoordinator`, from the selected dataset's archive-metadata row | Non-empty per-node archive context paired with `dataset`. For filesystem storage, passed as `--archive-id <archive-id>`. For S3 storage, forms the final component of the archive object key. It also identifies the archive in task logs and result documents and is an input to the deterministic result `_id` defined by [Results-cache deduplication](results-cache-dedupe.md). |
 | `clp_s_query_option.query_string` | Query-job configuration | A non-empty string passed as clp-s's positional query without reinterpretation by the TDL task. |
-| `clp_s_query_option.max_num_results` | Query-job configuration | When `Some(n)`, uses `n`. When `None`, uses `DEFAULT_MAX_NUM_QUERY_RESULTS` from `clp-rust-utils`; `None` does not mean unlimited. The task always passes the resolved value as `results-cache --max-num-results <n>`. The resulting limit applies independently to this archive invocation. |
+| `clp_s_query_option.max_num_results` | Query-job configuration | When `Some(n)`, passes `results-cache --max-num-results <n>`; the limit applies independently to this archive invocation. When `None`, omits `--max-num-results` and uses clp-s's default. |
 | `clp_s_query_option.begin_timestamp_millisecs` | Query-job configuration | Inclusive lower bound in Unix epoch milliseconds. When present, passed unchanged as `--tge <milliseconds>`; omitted otherwise. |
 | `clp_s_query_option.end_timestamp_millisecs` | Query-job configuration | Inclusive upper bound in Unix epoch milliseconds. When present, passed unchanged as `--tle <milliseconds>`; omitted otherwise. |
 | `clp_s_query_option.ignore_case` | Query-job configuration | Adds `--ignore-case` when true; adds no argument when false. |
+| `output_handle` | `QueryCoordinator`, copied into every archive input for the query job | Reserved to select the clp-s output-handler subcommand. The current `OutputHandle` enum is empty, so no value can yet be constructed or handled. The task implementation will define the initial results-cache variant and its exact argument mapping. |
 
 The task obtains `CLP_HOME`, `archive_output`, and `results_cache` from
 process-global worker configuration. `results_cache` therefore must be added
@@ -480,7 +519,8 @@ endpoint, region, bucket, key prefix, and AWS authentication configuration from
 child environment. These deployment-wide values are not serialized into every
 task.
 
-For filesystem archives, the resulting command is:
+For filesystem archives, the intended command for the future results-cache
+variant is:
 
 ```text
 <CLP_HOME>/bin/clp-s s <archive-root>/<dataset>
