@@ -111,8 +111,8 @@ The TDL package defines how each graph node executes:
 - `query::clp_s_query_to_results_cache` interprets one CLP-S
   dataset/archive input and launches clp-s.
 - clp-s writes matches directly to MongoDB collection
-  `<query_job_id>`; the archive task returns archive identity as its graph
-  output and reports execution success or failure to Spider.
+  `<query_job_id>`; the archive task returns no application data and reports
+  only execution success or failure to Spider.
 
 The package does not select archives, construct the job-specific graph, or
 return query results to the coordinator. It does not update the MySQL
@@ -194,8 +194,8 @@ Given the baseline architecture, the query TDL package must provide:
   [Results-cache deduplication](results-cache-dedupe.md). Section 6.3.4 defines
   only how the TDL task propagates that writer's outcome to Spider.
 - A TDL task MUST return `TdlError::ExecutionError` for every configuration,
-  process, or non-duplicate results-cache failure. It MUST NOT return a
-  `QueryTaskOutput` unless clp-s exits successfully after completing its writes.
+  process, or non-duplicate results-cache failure. It MUST return `Ok(())` only
+  after clp-s exits successfully and completes its writes.
 - `begin_timestamp_millisecs` and `end_timestamp_millisecs` MUST use Unix epoch
   milliseconds across the shared wire type, TDL task, and clp-s `--tge` and
   `--tle` arguments.
@@ -337,11 +337,10 @@ MySQL query-job status. Each task box represents one logical archive node; a
 retry or soft-timeout replacement is another instance of that same node, not
 another planned archive node.
 
-The archive-query function returns a `QueryTaskOutput` identifying the archive
-that completed. Query results are not carried in this output: clp-s writes
-them directly to MongoDB. Returning `Ok(QueryTaskOutput { .. })` tells Spider
-that the archive node completed successfully; returning `Err(TdlError)` fails
-that graph node.
+The archive-query function returns no application data. Returning `Ok(())`
+tells Spider that the archive node completed successfully; returning
+`Err(TdlError)` fails that graph node. The dataset and archive ID remain input
+and error-context fields rather than being echoed through Spider as output.
 
 ### 6.2 Shared task I/O types
 
@@ -372,12 +371,6 @@ pub struct ClpSQueryOption {
     pub end_timestamp_millisecs: Option<i64>,
     pub ignore_case: bool,
 }
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct QueryTaskOutput {
-    pub dataset: NonEmptyString,
-    pub archive_id: NonEmptyString,
-}
 ```
 
 `QueryJobId` mirrors the signed MySQL `INT` type of `query_jobs.id`, matching
@@ -402,11 +395,11 @@ The relationship to the existing compression wire types is:
 | --- | --- | --- |
 | `QueryJobId` | Identifies the durable query job and its MongoDB collection. | `CompressionJobId` identifies the durable compression job. |
 | `ClpSQueryOption` | Job-wide clp-s query behavior copied unchanged into every archive-task payload. Its fields control how clp-s evaluates the query; it does not identify which archive or dataset a node searches. | `ClpSCompressionOption` contains job-wide native compression options copied into every compression-task payload. |
-| `QueryTaskOutput` | Identifies the dataset and archive whose query invocation completed. It does not contain query results. | `CompressionTaskOutput` contains newly created archive metadata that must be published by `compression::commit`. |
 
-Unlike `CompressionTaskOutput`, `QueryTaskOutput` does not describe data that a
-later task must publish. Query results are already persisted in MongoDB by
-clp-s, and no task consumes `QueryTaskOutput` in the MVP.
+There is no query-side analogue of `CompressionTaskOutput`.
+`CompressionTaskOutput` carries archive metadata into `compression::commit`,
+whereas a query task has no downstream consumer: clp-s has already persisted
+the results in MongoDB, and Spider needs only the node's success or failure.
 
 #### 6.2.1 Query options versus archive-task context
 
@@ -454,7 +447,7 @@ pub(crate) fn clp_s_query_to_results_cache_task(
     clp_s_query_option: ClpSQueryOption,
     dataset: Option<NonEmptyString>,
     archive_id: NonEmptyString,
-) -> Result<QueryTaskOutput, TdlError>;
+) -> Result<(), TdlError>;
 ```
 
 The task executes exactly one clp-s query against exactly one archive in one
@@ -518,19 +511,16 @@ bound.
 
 The implementation MUST construct the argument vector without a shell, wait for
 the child process, and drain its standard streams. Exit code zero returns
-`Ok(QueryTaskOutput { dataset: resolved_dataset, archive_id })`; a
-configuration, credential, URL-construction, spawn/wait, or non-zero-exit
-failure returns
+`Ok(())`; a configuration, credential, URL-construction, spawn/wait, or
+non-zero-exit failure returns
 `TdlError::ExecutionError`. Zero matching log events is successful.
 
 #### 6.3.3 Outputs and their consumers
 
-**Returned task output:**
-`QueryTaskOutput { dataset: resolved_dataset, archive_id }`. The dataset is the
-non-empty result of resolving an absent input to `default`. The output
-identifies the successfully processed archive but contains no query results or
-result statistics. No downstream task consumes it in the MVP, and the query
-job handler does not use it to infer graph success.
+**Returned task output:** `()`. The task returns no application payload and no
+downstream node consumes an output. `Ok(())` reports successful completion of
+the archive node to Spider; the query job handler uses the terminal graph state,
+not task output, to determine job success.
 
 **Persistent output:** clp-s writes one MongoDB document per retained match
 into collection `<query_job_id>`. clp-s supplies the deterministic `_id`
@@ -565,9 +555,8 @@ to Spider:
   wait, signal-termination, or nonzero-exit failure into
   `TdlError::ExecutionError` containing the query-job ID, dataset, and archive
   ID as error context.
-- The task MUST NOT return `QueryTaskOutput` before the child process exits or
-  after any failure. It MUST NOT catch, log, and then convert a failure into
-  `Ok`.
+- The task MUST NOT return `Ok(())` before the child process exits or after any
+  failure. It MUST NOT catch, log, and then convert a failure into `Ok`.
 - The clp-s child MUST NOT outlive its Spider task instance. The TDL
   implementation MUST launch and supervise the child so that Spider's hard
   timeout terminates the child as well as the task executor, and it MUST reap
