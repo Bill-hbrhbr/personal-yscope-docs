@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import pathlib
+import subprocess
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,21 @@ blockquote { border-left: 4px solid #d0d7de; margin: 1em 0; padding: 0 1em; colo
 a { color: #0969da; }
 .index li { margin: .3em 0; }
 """
+
+
+def get_lan_ip() -> str | None:
+    """Return the source IP used by the machine's default network route."""
+    try:
+        route = subprocess.run(
+            ["ip", "route", "get", "1.1.1.1"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.split()
+        return route[route.index("src") + 1]
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
 
 
 def render(md_path: pathlib.Path) -> str:
@@ -146,7 +162,8 @@ def main() -> int:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
     host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"Serving {HERE} on http://{host}:{port}  (Ctrl-C to stop)")
+    display_host = (get_lan_ip() or host) if host == "0.0.0.0" else host
+    print(f"Serving {HERE} on http://{display_host}:{port}  (Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
