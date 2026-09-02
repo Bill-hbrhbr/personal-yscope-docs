@@ -1,49 +1,41 @@
 # Search Coordinator (Rust) — Design
 
-Rewriting the Python **query scheduler**
-(`components/job-orchestration/job_orchestration/scheduler/query/query_scheduler.py`)
-as a Rust **search coordinator**. An existing framework can be referenced at
-`components/compression-coordinator`, though search has more complexities (job
-categorization, aggregation, decompression, cancellation).
+Rewriting the Python **query scheduler** (`components/job-orchestration/job_orchestration/scheduler/query/query_scheduler.py`) as a Rust **search coordinator**. An existing framework can be referenced at `components/compression-coordinator`, though search has more complexities (job categorization, aggregation, decompression, cancellation).
 
-Scope: the full orchestration lifecycle — concurrency/pool, poll loop, job
-retirement/updates, sleep/wake cadence, query-table row reading, job
-categorization, cancellation, aggregation (timeline + other), and
-decompression. The current celery **reducer subsystem is deleted entirely** and
-must not be carried over (see §7).
+Scope: the full orchestration lifecycle — concurrency/pool, poll loop, job retirement/updates, sleep/wake cadence, query-table row reading, job categorization, cancellation, aggregation (timeline + other), and decompression. The current celery **reducer subsystem is deleted entirely** and must not be carried over (see §7).
 
 ---
 
 ## Catalog
 
 - [1. Background](#1-background)
-    - [1.1 Tables and collections involved](#11-tables-and-collections-involved)
-    - [1.2 Search query sources and the query jobs table](#12-search-query-sources-and-the-query-jobs-table)
-    - [1.3 clp-s search output handlers](#13-clp-s-search-output-handlers)
-    - [1.4 Source-to-output-handler mapping](#14-source-to-output-handler-mapping)
-    - [1.5 Reducer (high-level)](#15-reducer-high-level)
+- [1.1 Tables and collections involved](#11-tables-and-collections-involved)
+- [1.2 Search query sources and the query jobs table](#12-search-query-sources-and-the-query-jobs-table)
+- [1.3 clp-s search output handlers](#13-clp-s-search-output-handlers)
+- [1.4 Source-to-output-handler mapping](#14-source-to-output-handler-mapping)
+- [1.5 Reducer (high-level)](#15-reducer-high-level)
 - [2. Current state](#2-current-state)
-    - [2.1 Job types and lifecycle](#21-job-types-and-lifecycle)
-    - [2.2 Cancellation sources](#22-cancellation-sources)
-    - [2.3 Webui's paired search + aggregation jobs over the same archives](#23-webuis-paired-search-aggregation-jobs-over-the-same-archives)
-    - [2.4 Reducer wiring](#24-reducer-wiring)
+- [2.1 Job types and lifecycle](#21-job-types-and-lifecycle)
+- [2.2 Cancellation sources](#22-cancellation-sources)
+- [2.3 Webui's paired search + aggregation jobs over the same archives](#23-webuis-paired-search-aggregation-jobs-over-the-same-archives)
+- [2.4 Reducer wiring](#24-reducer-wiring)
 - [3. Phased roadmap](#3-phased-roadmap)
 - [4. MVP](#4-mvp)
-    - [4.1 Features to support](#41-features-to-support)
-    - [4.2 Limitations](#42-limitations)
-    - [4.3 Features removed vs. the Python scheduler](#43-features-removed-vs-the-python-scheduler)
+- [4.1 Features to support](#41-features-to-support)
+- [4.2 Limitations](#42-limitations)
+- [4.3 Features removed vs. the Python scheduler](#43-features-removed-vs-the-python-scheduler)
 - [5. MVP+1 — Cancellation](#5-mvp1-cancellation)
-    - [5.1 Features to support](#51-features-to-support)
-    - [5.2 Support plan](#52-support-plan)
-    - [5.3 Features removed vs. the Python scheduler](#53-features-removed-vs-the-python-scheduler)
+- [5.1 Features to support](#51-features-to-support)
+- [5.2 Support plan](#52-support-plan)
+- [5.3 Features removed vs. the Python scheduler](#53-features-removed-vs-the-python-scheduler)
 - [6. MVP+2 — Timeline aggregation](#6-mvp2-timeline-aggregation)
-    - [6.1 Features to support](#61-features-to-support)
-    - [6.2 Support plan](#62-support-plan)
-    - [6.3 Features removed vs. the Python scheduler](#63-features-removed-vs-the-python-scheduler)
+- [6.1 Features to support](#61-features-to-support)
+- [6.2 Support plan](#62-support-plan)
+- [6.3 Features removed vs. the Python scheduler](#63-features-removed-vs-the-python-scheduler)
 - [7. MVP+3 — Decompression](#7-mvp3-decompression)
-    - [7.1 Features to support](#71-features-to-support)
-    - [7.2 Support plan](#72-support-plan)
-    - [7.3 Features removed vs. the Python scheduler](#73-features-removed-vs-the-python-scheduler)
+- [7.1 Features to support](#71-features-to-support)
+- [7.2 Support plan](#72-support-plan)
+- [7.3 Features removed vs. the Python scheduler](#73-features-removed-vs-the-python-scheduler)
 - [8. Misc](#8-misc)
 - [9. Open questions](#9-open-questions)
 
@@ -53,37 +45,34 @@ must not be carried over (see §7).
 
 ### 1.1 Tables and collections involved
 
-Two storage tiers: a **control plane** (MySQL) the coordinator reads and writes,
-and a **data plane** (MongoDB, the results cache) that clp-s workers write and
-clients read.
+Two storage tiers: a **control plane** (MySQL) the coordinator reads and writes, and a **data plane** (MongoDB, the results cache) that clp-s workers write and clients read.
 
 **Control plane** (MySQL; created by `initialize-orchestration-db.py`):
 
 - `QUERY_JOBS_TABLE_NAME` — one row per query job. Columns:
-    - `id`
-    - `type` (`QueryJobType`)
-    - `status` (`QueryJobStatus`)
-    - `creation_time`
-    - `start_time`
-    - `duration`
-    - `num_tasks`
-    - `num_tasks_completed`
-    - `job_config` (`MEDIUMBLOB`, msgpack `SearchJobConfig`)
+- `id`
+- `type` (`QueryJobType`)
+- `status` (`QueryJobStatus`)
+- `creation_time`
+- `start_time`
+- `duration`
+- `num_tasks`
+- `num_tasks_completed`
+- `job_config` (`MEDIUMBLOB`, msgpack `SearchJobConfig`)
 - `QUERY_TASKS_TABLE_NAME` — one row per archive-level task. Columns:
-    - `id`
-    - `job_id` (FK → `QUERY_JOBS_TABLE_NAME.id`)
-    - `status` (`QueryTaskStatus`)
-    - `archive_id`
-    - `start_time`
-    - `duration`
+- `id`
+- `job_id` (FK → `QUERY_JOBS_TABLE_NAME.id`)
+- `status` (`QueryTaskStatus`)
+- `archive_id`
+- `start_time`
+- `duration`
 
 **Data plane** (MongoDB; `clp_config.results_cache`):
 
 - One collection per query job, named by the job id. Contents:
-    - matching records (plain search)
-    - `{timestamp, count}` timeline documents (aggregation)
-- `results_metadata_collection_name` (`clp_config.webui`) — per-search signal
-  state, keyed by `searchJobId`.
+- matching records (plain search)
+- `{timestamp, count}` timeline documents (aggregation)
+- `results_metadata_collection_name` (`clp_config.webui`) — per-search signal state, keyed by `searchJobId`.
 - `stream_collection_name` — used by decompression jobs.
 
 ### 1.2 Search query sources and the query jobs table
@@ -95,26 +84,15 @@ clients read.
 | **package `search.py`** | Python | search, **optionally with aggregation** (`aggregation_config` set when `--count` / `--count-by-time` passed) — **one job row** | `submit_query_job` |
 | **package `decompress.py`** | Python | decompression only (`EXTRACT_IR` / `EXTRACT_JSON`) — not search | `submit_query_job` |
 
-- **Search vs. aggregation**: both use `SEARCH_OR_AGGREGATION`. A job with
-  `aggregation_config` set is an aggregation job; otherwise it is a plain search
-  job.
-- **Common job format**: all sources ultimately write the same row format to
-  `QUERY_JOBS_TABLE_NAME`, with a msgpacked `SearchJobConfig`. The coordinator
-  therefore processes jobs based on `type` and `aggregation_config`, regardless
-  of source.
-- **Different aggregation styles**: the webui submits search and aggregation as
-  two separate job rows, while the package combines them into one row using
-  `aggregation_config`. Aggregation goes through the reducer in either case.
-- **Shared package helper**: `submit_query_job` in
-  `clp_package_utils/scripts/native/utils.py` is shared by the package's
-  `search.py` and `decompress.py`.
-- **Cancellation**: the package only submits jobs and observes their status;
-  cancellation is supported only by the webui server and the api-server.
+- **Search vs. aggregation**: both use `SEARCH_OR_AGGREGATION`. A job with `aggregation_config` set is an aggregation job; otherwise it is a plain search job.
+- **Common job format**: all sources ultimately write the same row format to `QUERY_JOBS_TABLE_NAME`, with a msgpacked `SearchJobConfig`. The coordinator therefore processes jobs based on `type` and `aggregation_config`, regardless of source.
+- **Different aggregation styles**: the webui submits search and aggregation as two separate job rows, while the package combines them into one row using `aggregation_config`. Aggregation goes through the reducer in either case.
+- **Shared package helper**: `submit_query_job` in `clp_package_utils/scripts/native/utils.py` is shared by the package's `search.py` and `decompress.py`.
+- **Cancellation**: the package only submits jobs and observes their status; cancellation is supported only by the webui server and the api-server.
 
 ### 1.3 clp-s search output handlers
 
-A clp-s search worker (one per archive) writes its matches through one of five
-**output handlers**, selected by the search config.
+A clp-s search worker (one per archive) writes its matches through one of five **output handlers**, selected by the search config.
 
 | Handler | subcommand | Class | What it does |
 |---|---|---|---|
@@ -124,8 +102,7 @@ A clp-s search worker (one per archive) writes its matches through one of five
 | **results-cache** | `results-cache` | `ResultsCacheOutputHandler` | writes results as documents into a results-cache collection (`--uri`, `--collection <job_id>`) |
 | **reducer** | `reducer` | `CountReducerOutputHandler` / `CountByTimeReducerOutputHandler` / `AggregationOutputHandler` | aggregation: streams **per-archive** aggregated results to the reducer process over a socket; sub-selected by `--count` / `--count-by-time` |
 
-Selection logic in `fs_search_task` (the celery worker building the clp-s
-command), in priority order:
+Selection logic in `fs_search_task` (the celery worker building the clp-s command), in priority order:
 
 1. `aggregation_config` set → **reducer** (with `--count` / `--count-by-time`).
 2. else `network_address` set → **network**.
@@ -134,8 +111,7 @@ command), in priority order:
 
 ### 1.4 Source-to-output-handler mapping
 
-Which handler a job selects follows from the fields each source sets on
-`SearchJobConfig` (per the selection priority above).
+Which handler a job selects follows from the fields each source sets on `SearchJobConfig` (per the selection priority above).
 
 | Source | stdout | file | network | results-cache | reducer |
 |---|---|---|---|---|---|
@@ -143,41 +119,23 @@ Which handler a job selects follows from the fields each source sets on
 | webui server | — | — | — | ✓ (search job) | ✓ (aggregation job) |
 | api-server | — | ✓ ³ | — | ✓ ³ | — |
 
-package `decompress.py` is not listed — decompression uses `clp-s x` (extract),
-not a search output handler.
+package `decompress.py` is not listed — decompression uses `clp-s x` (extract), not a search output handler.
 
 Footnotes:
 
-1. package `search.py` stdout: terminal output is produced via the **network**
-   handler — clp-s streams to a TCP server that `search.py` runs, which prints to
-   its own stdout. The `stdout` handler is only reached when `clp-s search` is run
-   directly from a terminal; no job-submitting source selects it.
-2. package `search.py` file: `search.py` never sets `write_to_file`, so the `file`
-   handler is never selected.
-3. api-server: `file` vs `results-cache` is toggled by `buffer_results_in_mongodb`
-   — `false` → `file`, `true` → `results-cache`.
+1. package `search.py` stdout: terminal output is produced via the **network** handler — clp-s streams to a TCP server that `search.py` runs, which prints to its own stdout. The `stdout` handler is only reached when `clp-s search` is run directly from a terminal; no job-submitting source selects it.
+2. package `search.py` file: `search.py` never sets `write_to_file`, so the `file` handler is never selected.
+3. api-server: `file` vs `results-cache` is toggled by `buffer_results_in_mongodb` — `false` → `file`, `true` → `results-cache`.
 
 ### 1.5 Reducer (high-level)
 
-The reducer is a standalone C++ process (`reducer-server`) that performs the
-cross-archive **reduce** for aggregation jobs. clp-s search workers (one per
-archive) do the **map** locally — bucketing matches (`CountByTimeOutputHandler`)
-or counting (`CountReducerOutputHandler`) — and stream their per-archive partial
-results to the reducer over a TCP socket. The reducer accumulates the sum in
-memory (`CountOperator`) and upserts the combined `{timestamp, count}` timeline
-to the per-job results-cache collection every `upsert_interval` (default 100 ms),
-so the timeline fills in live as the job runs. On completion it does a final
-publish and acknowledges the query scheduler.
+The reducer is a standalone C++ process (`reducer-server`) that performs the cross-archive **reduce** for aggregation jobs. clp-s search workers (one per archive) do the **map** locally — bucketing matches (`CountByTimeOutputHandler`) or counting (`CountReducerOutputHandler`) — and stream their per-archive partial results to the reducer over a TCP socket. The reducer accumulates the sum in memory (`CountOperator`) and upserts the combined `{timestamp, count}` timeline to the per-job results-cache collection every `upsert_interval` (default 100 ms), so the timeline fills in live as the job runs. On completion it does a final publish and acknowledges the query scheduler.
 
-- **Streaming reduce** — results are upserted incrementally, not summed in a
-  batch at the end.
-- **In-memory accumulator** — the hot working set stays off the results cache;
-  only the compact combined timeline is written.
-- **Completion handshake** — the reducer knows when all workers have flushed and
-  signals the scheduler.
+- **Streaming reduce** — results are upserted incrementally, not summed in a batch at the end.
+- **In-memory accumulator** — the hot working set stays off the results cache; only the compact combined timeline is written.
+- **Completion handshake** — the reducer knows when all workers have flushed and signals the scheduler.
 
-The reducer is spawned by a Python runner (`reducer.py`) with a configurable
-concurrency of N `reducer-server` processes.
+The reducer is spawned by a Python runner (`reducer.py`) with a configurable concurrency of N `reducer-server` processes.
 
 ## 2. Current state
 
@@ -204,20 +162,9 @@ stateDiagram-v2
 - Terminal states: `SUCCEEDED`, `FAILED`, `CANCELLED`, `KILLED`.
 - The compression coordinator has no cancel action of its own — it is submit-and-poll-only, so `Killed` there is just a relabel of Spider's observed `Cancelled` terminal state ([job_handle.rs#L533](https://github.com/y-scope/clp/blob/fcfe3aee252fc8ac0ad5a0942ea029e65ac17f1d/components/compression-coordinator/src/job_handle.rs#L533)). The search side's `KILLED` is the `kill_hanging_jobs` startup-cleanup path — different semantics, same name. The `CANCELLED` state stays (it may remain useful once a real cancel path exists), but the `KILLED` renaming is unnecessary and will be removed from both coordinators.
 
-The Python scheduler also has an in-memory `InternalJobState` with
-`WAITING_FOR_REDUCER`, `WAITING_FOR_DISPATCH`, and `RUNNING`. These are scheduler execution phases,
-not additional values in the durable `QueryJobStatus` lifecycle. For example, a SQL job can remain
-`RUNNING` while its in-memory object alternates between `WAITING_FOR_DISPATCH` and `RUNNING` for
-successive archive batches.
+The Python scheduler also has an in-memory `InternalJobState` with `WAITING_FOR_REDUCER`, `WAITING_FOR_DISPATCH`, and `RUNNING`. These are scheduler execution phases, not additional values in the durable `QueryJobStatus` lifecycle. For example, a SQL job can remain `RUNNING` while its in-memory object alternates between `WAITING_FOR_DISPATCH` and `RUNNING` for successive archive batches.
 
-**Persistence restraint:** store the minimum status and supporting columns needed by external
-consumers or fault-tolerant recovery. For the Spider path this includes durable facts such as the
-CLP job status, `spider_id`, `dispatch_time`, `start_time`, and terminal diagnostics. A transient
-phase such as "building the graph," "polling Spider," or "verifying the commit" should remain in
-the job handle when it can be reconstructed after a restart from those durable facts. This avoids
-unnecessary MySQL updates and row contention without sacrificing recovery. Add a status or column
-when omitting it would make an acknowledged action ambiguous after a crash—for example, persisting
-`spider_id` is necessary to reattach rather than submit duplicate work.
+**Persistence restraint:** store the minimum status and supporting columns needed by external consumers or fault-tolerant recovery. For the Spider path this includes durable facts such as the CLP job status, `spider_id`, `dispatch_time`, `start_time`, and terminal diagnostics. A transient phase such as "building the graph," "polling Spider," or "verifying the commit" should remain in the job handle when it can be reconstructed after a restart from those durable facts. This avoids unnecessary MySQL updates and row contention without sacrificing recovery. Add a status or column when omitting it would make an acknowledged action ambiguous after a crash—for example, persisting `spider_id` is necessary to reattach rather than submit duplicate work.
 
 ### 2.2 Cancellation sources
 
@@ -272,10 +219,7 @@ The structure mirrors the compression-coordinator (poll loop, two-phase fetch, s
 
 The coordinator continues polling Spider until the graph is terminal. On success it verifies that `search::commit` has already committed `SUCCEEDED`; it does not perform a second success write. If Spider fails or is unexpectedly cancelled before a successful commit, the coordinator records `FAILED` and a `status_msg`, while first preserving an already-committed `SUCCEEDED` result. This division makes successful publication atomic and idempotent in the worker-side commit transaction while retaining coordinator-side failure reporting and restart recovery.
 
-The Rust job handle should follow the persistence restraint from §2.1. Its async control flow can
-represent preparation, submission, Spider polling, and commit verification without adding those
-phases to `QueryJobStatus` or writing them to MySQL. Persist additional state only when it closes a
-real crash-recovery ambiguity.
+The Rust job handle should follow the persistence restraint from §2.1. Its async control flow can represent preparation, submission, Spider polling, and commit verification without adding those phases to `QueryJobStatus` or writing them to MySQL. Persist additional state only when it closes a real crash-recovery ambiguity.
 
 MVP features:
 
@@ -342,25 +286,11 @@ What MVP definitely does **not** support:
 
 ### _2.4 clp-s search output handlers
 
-**Scope:** everything in this subsection concerns the **clp-s binary's `search`
-command** — its five output handlers (the *complete* set of user-facing output
-destinations, registered at `CommandLineArguments.cpp:1023-1028` as the
-`file`/`network`/`reducer`/`results-cache`/`stdout` subcommands) and, for each
-§2.1 source, which of those handlers its submitted jobs can select. The five are
-exhaustive for `clp-s search`; `VectorOutputHandler` and the `Aggregation*`
-handlers are not CLI-selectable (aggregation is sub-selected within `reducer`).
+**Scope:** everything in this subsection concerns the **clp-s binary's `search` command** — its five output handlers (the *complete* set of user-facing output destinations, registered at `CommandLineArguments.cpp:1023-1028` as the `file`/`network`/`reducer`/`results-cache`/`stdout` subcommands) and, for each §2.1 source, which of those handlers its submitted jobs can select. The five are exhaustive for `clp-s search`; `VectorOutputHandler` and the `Aggregation*` handlers are not CLI-selectable (aggregation is sub-selected within `reducer`).
 
-Out of scope here: (a) **decompression** — `EXTRACT_*` jobs use the separate
-`extract_stream` clp-s path, not a search output handler; and (b) **how a source
-delivers results to its own client** — the webui reading Mongo, the api-server
-streaming over HTTP, and `search.py` printing from its TCP server are
-consumer-side mechanisms, not clp-s output handlers.
+Out of scope here: (a) **decompression** — `EXTRACT_*` jobs use the separate `extract_stream` clp-s path, not a search output handler; and (b) **how a source delivers results to its own client** — the webui reading Mongo, the api-server streaming over HTTP, and `search.py` printing from its TCP server are consumer-side mechanisms, not clp-s output handlers.
 
-A clp-s search worker (one per archive) writes its matches through one of five
-**output handlers**, selected by the search config. The handler names below are
-the `cXxxOutputHandlerName` constants in
-`components/core/src/clp_s/CommandLineArguments.cpp`; the classes are in
-`components/core/src/clp_s/OutputHandlerImpl.hpp`.
+A clp-s search worker (one per archive) writes its matches through one of five **output handlers**, selected by the search config. The handler names below are the `cXxxOutputHandlerName` constants in `components/core/src/clp_s/CommandLineArguments.cpp`; the classes are in `components/core/src/clp_s/OutputHandlerImpl.hpp`.
 
 | Handler | CLI name | Class | What it does | Used by |
 |---|---|---|---|---|
@@ -370,21 +300,18 @@ the `cXxxOutputHandlerName` constants in
 | **results-cache** | `results-cache` | `ResultsCacheOutputHandler` | writes results as documents into a MongoDB collection (`--uri`, `--collection <job_id>`, `--max-num-results`, optional `--dataset`) | the persistent results-cache path — webui reads collection `<job_id>`; scheduler's `found_max_num_latest_results` reads it for max-results short-circuit |
 | **reducer** | `reducer` | `CountReducerOutputHandler` / `CountByTimeReducerOutputHandler` / `AggregationOutputHandler` | aggregation: streams **per-archive** aggregated results to the reducer process over a socket (`--host --port --job-id`). Sub-selected by `--count` (total count), `--count-by-time SIZE` (timeline buckets), or richer aggregation config | the aggregation jobs (webui `aggregationJobId`, CLI `--count`/`--count-by-time`) |
 
-Selection logic in `fs_search_task` (the celery worker building the clp-s
-command), in priority order:
+Selection logic in `fs_search_task` (the celery worker building the clp-s command), in priority order:
 
 1. `aggregation_config` is set → **reducer** (with `--count` / `--count-by-time`).
 2. else `network_address` is set → **network**.
 3. else `write_to_file` → **file**.
 4. else → **results-cache**.
 
-(`stdout` is the clp-s binary's own default when run from the CLI, not a path
-the celery scheduler selects.)
+(`stdout` is the clp-s binary's own default when run from the CLI, not a path the celery scheduler selects.)
 
 ### Which sources select which handler
 
-Determined by which fields each source sets on `SearchJobConfig` (the selection
-priority above). Verified from each source's config construction:
+Determined by which fields each source sets on `SearchJobConfig` (the selection priority above). Verified from each source's config construction:
 
 | Source | stdout | file | network | results-cache | reducer |
 |---|---|---|---|---|---|
@@ -406,13 +333,7 @@ Other notes:
 - `results-cache` is the common default and the only handler mcp-server ever uses.
 - **S3 is a valid destination, not a separate handler.** The `file` handler's local output is uploaded to S3 when the worker's `stream_output.storage.type == S3` (and `write_to_file` and the task succeeded) — see `upload_results_to_s3` in `fs_search_task`, which writes to `{job_id}/{archive_id}`. So S3 is reachable via the `file` handler (e.g. api-server with `buffer_results_in_mongodb=false` on an S3-configured worker).
 
-**Map-reduce note**: `reducer` is the **map** side — `CountByTimeReducerOutputHandler`
-buckets matches per archive (`m_bucket_counts[bucket] += 1`) and flushes them to
-the reducer over the socket. The reducer process (`CountOperator`) does the
-**cross-archive sum** and writes the combined `{timestamp, count}` timeline to
-Mongo. Deleting the reducer (§6) keeps the clp-s per-archive map; the
-cross-archive reduce is done internally by MongoDB in the results cache (MVP+2)
-— never by the coordinator.
+**Map-reduce note**: `reducer` is the **map** side — `CountByTimeReducerOutputHandler` buckets matches per archive (`m_bucket_counts[bucket] += 1`) and flushes them to the reducer over the socket. The reducer process (`CountOperator`) does the **cross-archive sum** and writes the combined `{timestamp, count}` timeline to Mongo. Deleting the reducer (§6) keeps the clp-s per-archive map; the cross-archive reduce is done internally by MongoDB in the results cache (MVP+2) — never by the coordinator.
 
 ---
 
@@ -426,9 +347,7 @@ The rewrite is a three-part project:
 
 ### Part 1 baseline — branch `search-coordinator/init`
 
-The branch reuses the structure of the **compression-coordinator**, already
-Spider-based (this settles the old "Celery vs Rust worker" question: tasks go to
-Spider). What it already has:
+The branch reuses the structure of the **compression-coordinator**, already Spider-based (this settles the old "Celery vs Rust worker" question: tasks go to Spider). What it already has:
 
 | Area | On the branch | Reference in compression-coordinator |
 |---|---|---|
@@ -445,10 +364,7 @@ Spider). What it already has:
 
 ### Part 1 gaps — what the branch does not do yet
 
-The branch treats every `QUERY_JOBS_TABLE_NAME` row identically; **job categorization is
-entirely absent** — this is the main new work relative to the compression side,
-because `compression_jobs` has no `type` column, so the compression-coordinator
-never needed to categorize:
+The branch treats every `QUERY_JOBS_TABLE_NAME` row identically; **job categorization is entirely absent** — this is the main new work relative to the compression side, because `compression_jobs` has no `type` column, so the compression-coordinator never needed to categorize:
 
 - `fetch_new_job_rows` projects only `id` — it never reads `type`, `job_config`, or `creation_time`.
 - `QueryJobHandle::new` is a stub: no msgpack deserialization of `job_config`, no `SearchJobConfig` / `ExtractIrJobConfig` / `ExtractJsonJobConfig` variants, no `aggregation_config` branch. Contrast with compression's `S3CompressionJobHandle::new`, which deserializes `ClpIoConfig`, rejects non-S3 inputs with `Error::UnsupportedInputConfig`, and derives the clp-s options — the same shape search needs, plus the `type` dispatch in front.
@@ -457,17 +373,11 @@ never needed to categorize:
 - `update_job_status` has no previous-status CAS guard. Python guards with `set_job_or_task_status(prev_status=...)` (cancel-during-finish races), and compression's commit path CASes on `status = Running`; add the same guard.
 - No CANCELLING scan, no per-job cancellation wiring (MVP+1).
 
-Part-1 work on top of the baseline, in order: widen the fetch projection
-(`type`, `job_config`, `creation_time`); categorize in `QueryJobHandle::new`
-(`type` → config variant → `aggregation_config` branch), returning
-`UnsupportedInputConfig` for not-yet-supported categories; write `QUERY_TASKS_TABLE_NAME`
-rows and a real `num_tasks`; add the CAS guard on status transitions; then the
-MVP+1 cancellation scan.
+Part-1 work on top of the baseline, in order: widen the fetch projection (`type`, `job_config`, `creation_time`); categorize in `QueryJobHandle::new` (`type` → config variant → `aggregation_config` branch), returning `UnsupportedInputConfig` for not-yet-supported categories; write `QUERY_TASKS_TABLE_NAME` rows and a real `num_tasks`; add the CAS guard on status transitions; then the MVP+1 cancellation scan.
 
 ### MVP — plain search end-to-end (detailed)
 
-The core path for a `SEARCH_OR_AGGREGATION` job with `aggregation_config = None`.
-This is what MVP must implement.
+The core path for a `SEARCH_OR_AGGREGATION` job with `aggregation_config = None`. This is what MVP must implement.
 
 | Step | Old (Python query scheduler) | New (Rust search coordinator) |
 |---|---|---|
@@ -482,15 +392,11 @@ This is what MVP must implement.
 | `job_id` type | `str` everywhere (it's the Mongo collection name) | typed integer `JobId` internally; stringify only at the Mongo boundary |
 | Concurrency | `ProcessPoolExecutor(scheduler_concurrency)` for blocking dispatch | `Semaphore(max_concurrent_jobs)`; `available_permits()` bounds the fetch `LIMIT` (see concurrency table below) |
 
-Key MVP invariant: the **Mongo results cache (data plane) is untouched** — clp-s
-workers still write to collection `<job_id>`, the webui still reads it. Only the
-**MySQL control-plane orchestration** (discover/dispatch/retire/update) moves
-from Python to Rust.
+Key MVP invariant: the **Mongo results cache (data plane) is untouched** — clp-s workers still write to collection `<job_id>`, the webui still reads it. Only the **MySQL control-plane orchestration** (discover/dispatch/retire/update) moves from Python to Rust.
 
 ### Aggregation — timeline (detailed)
 
-`SEARCH_OR_AGGREGATION` with `aggregation_config` set. Timeline = count / count-by-time.
-This is a **map-reduce**; the reduce moves into the coordinator (MVP+2).
+`SEARCH_OR_AGGREGATION` with `aggregation_config` set. Timeline = count / count-by-time. This is a **map-reduce**; the reduce moves into the coordinator (MVP+2).
 
 | Aspect | Old (Python + reducer) | New (Rust coordinator) |
 |---|---|---|
@@ -504,8 +410,7 @@ This is a **map-reduce**; the reduce moves into the coordinator (MVP+2).
 | webui two-row split | webui submits a separate `aggregationJobId` row and cancels both ids | webui-side change (track separately): collapse to a single search-job row whose clp-s run also emits the timeline |
 | Other (non-timeline) aggregations | reducer (`AggregationOutputHandler`) | **MVP+N via Spider** (not ready); explicitly **not a port of the reducer** |
 
-Open (§7): how clp-s workers return per-archive bucket counts to the
-coordinator, and how the coordinator accumulates + writes the combined timeline.
+Open (§7): how clp-s workers return per-archive bucket counts to the coordinator, and how the coordinator accumulates + writes the combined timeline.
 
 ### Concurrency, polling, retirement, sleep
 
@@ -550,16 +455,7 @@ coordinator, and how the coordinator accumulates + writes the combined timeline.
 | `EXTRACT_IR` | `extract_stream` celery task (IR extraction) | **MVP+3** (decompression); wave to celery until then |
 | `EXTRACT_JSON` | `extract_stream` celery task (JSON extraction) | **MVP+3** (decompression); wave to celery until then |
 
-Categorization point: read `type` first, then deserialize `job_config` into the
-matching variant; within `SearchJobConfig`, branch on `aggregation_config`
-presence and on whether it's timeline (count/count-by-time) vs other. This lives
-in `QueryJobHandle::new` (currently a stub on the branch) — mirror
-`S3CompressionJobHandle::new`, which validates `ClpIoConfig` and returns
-`Error::UnsupportedInputConfig` for inputs it doesn't handle; the coordinator's
-`create_job_handle` already warns-and-skips on that error, which is the rollout
-mechanism for leaving aggregation/`EXTRACT_*` rows to the legacy scheduler until
-their phase lands. Note the compression side never needed this: `compression_jobs`
-has no `type` column — categorization is net-new for search.
+Categorization point: read `type` first, then deserialize `job_config` into the matching variant; within `SearchJobConfig`, branch on `aggregation_config` presence and on whether it's timeline (count/count-by-time) vs other. This lives in `QueryJobHandle::new` (currently a stub on the branch) — mirror `S3CompressionJobHandle::new`, which validates `ClpIoConfig` and returns `Error::UnsupportedInputConfig` for inputs it doesn't handle; the coordinator's `create_job_handle` already warns-and-skips on that error, which is the rollout mechanism for leaving aggregation/`EXTRACT_*` rows to the legacy scheduler until their phase lands. Note the compression side never needed this: `compression_jobs` has no `type` column — categorization is net-new for search.
 
 ### Decompression
 
@@ -621,16 +517,7 @@ Delete (do **not** carry over) all of:
 - the reducer handshake in `handle_finished_search_job`
 - the reducer process itself (`CountOperator` and friends)
 
-The reducer's role is **not** absorbed by the coordinator. The coordinator never
-executes search or aggregation logic — it only manages jobs and connects CLP
-services with Spider. Timeline aggregation instead works as: clp-s does the
-per-archive map (`--count-by-time` bucket counts), workers write those
-per-archive buckets to the **results cache**, and the cross-archive reduce
-(summing buckets into one `{timestamp, count}` timeline) is done **internally by
-MongoDB** over those documents. Other aggregations are a future Spider-backed
-path (MVP+N), not a reimplementation of the reducer. The webui's separate
-`aggregationJobId` (§2.2) is part of the reducer-era design and is dropped
-alongside it.
+The reducer's role is **not** absorbed by the coordinator. The coordinator never executes search or aggregation logic — it only manages jobs and connects CLP services with Spider. Timeline aggregation instead works as: clp-s does the per-archive map (`--count-by-time` bucket counts), workers write those per-archive buckets to the **results cache**, and the cross-archive reduce (summing buckets into one `{timestamp, count}` timeline) is done **internally by MongoDB** over those documents. Other aggregations are a future Spider-backed path (MVP+N), not a reimplementation of the reducer. The webui's separate `aggregationJobId` (§2.2) is part of the reducer-era design and is dropped alongside it.
 
 ---
 
