@@ -1,12 +1,12 @@
-# RFC: MVP Spider TDL package for CLP-S queries
+# RFC: MVP Spider TDL package for `clp-s` queries
 
 This RFC defines the normative Spider query TDL contract. Its primary outcome is the final field list for each query task input and output, including every field's Rust type, producer, validation and defaulting rules, exact use inside the task, and consumer. The contract is forward-looking and must be complete enough to implement the TDL functions without inferring behavior from the Python implementation.
 
 ## MVP scope summary
 
-The MVP covers only plain CLP-S queries using the results-cache output path:
+The MVP covers only plain `clp-s` queries using the results-cache output path:
 
-- **CLP-S only.** The MVP supports archives produced by the CLP-S storage engine and invokes `clp-s` to query them. The legacy CLP storage engine, `clo`, and all other storage engines are outside the MVP scope.
+- **`clp-s` only.** The MVP supports archives produced by the `clp-s` storage engine and invokes `clp-s` to query them. The legacy `clo` storage engine and all other storage engines are outside the MVP scope.
 - **Result-cache only.** The MVP will use clp-s's `results-cache` output handler to write query results directly to MongoDB. The task signature reserves an explicit `OutputHandle` argument for selecting the handler, but the current contract leaves that enum empty until the task implementation defines its concrete variant. The `network` and `file` output handlers are outside the MVP scope.
 - **No aggregation.** The MVP does not support a reducer or any count/count-by-time/min/max/unique aggregation. An accepted query job has no aggregation configuration.
 - **No cancellation.** The MVP does not consume `CANCELLING` query-job rows, request Spider cancellation, or define cancellation behavior for an active query task. `CANCELLED` is reserved for a future phase that adds explicit cancellation support. `KILLED` is removed from the query-job status model.
@@ -69,7 +69,7 @@ Spider owns distributed graph execution:
 
 The TDL package defines how each graph node executes:
 
-- `query::clp_s_search` interprets one CLP-S dataset/archive input and launches clp-s.
+- `query::clp_s_search` interprets one `clp-s` dataset/archive input and launches `clp-s`.
 - clp-s writes matches directly to MongoDB collection `<query_job_id>`; the archive task returns no application data and reports only execution success or failure to Spider.
 
 The package does not select archives, construct the job-specific graph, or return query results to the coordinator. It does not update the MySQL `query_jobs` row.
@@ -110,11 +110,11 @@ Given the baseline architecture, the query TDL package must provide:
 ## 4. Requirements
 
 - Section 6 MUST give the final Spider-visible task names and Rust signatures and, for every input and output, its type, producer, validation/defaulting, exact use, side effect, and consumer.
-- Every CLP-S query-specific serialized type in a task signature MUST use Serde and live in or be re-exported from `clp_rust_utils::task_io::query`.
+- Every `clp-s` query-specific serialized type in a task signature MUST use Serde and live in or be re-exported from `clp_rust_utils::task_io::query`.
 - The annotated task wrappers and implementations MUST live under `components/clp-tdl-package/src/task/query/` and be registered in the package task list in `components/clp-tdl-package/src/lib.rs`.
 - The coordinator-side graph builder MUST use the same task names, type descriptors, argument order, and MessagePack representation specified here.
 - Native query results MUST go directly to MongoDB; only control-plane success or failure returns through Spider.
-- The CLP-S results-cache writer MUST make repeated execution of the same archive query idempotent by following the contract in [Results-cache deduplication](https://app.notion.com/p/3c904e4d9e6b80d68854d02b96aaf267). Section 6.3.4 defines only how the TDL task propagates that writer's outcome to Spider.
+- The `clp-s` results-cache writer MUST make repeated execution of the same archive query idempotent by following the contract in [Results-cache deduplication](https://app.notion.com/p/3c904e4d9e6b80d68854d02b96aaf267). Section 6.3.4 defines only how the TDL task propagates that writer's outcome to Spider.
 - A TDL task MUST return `TdlError::ExecutionError` for every configuration, process, or non-duplicate results-cache failure. It MUST return `Ok(())` only after clp-s exits successfully and completes its writes.
 - `begin_timestamp_millisecs` and `end_timestamp_millisecs` MUST use Unix epoch milliseconds across the shared wire type, TDL task, and clp-s `--tge` and `--tle` arguments.
 
@@ -154,7 +154,7 @@ The coordinator MUST reject a policy whose hard timeout is not strictly greater 
 
 Preprocessing happens before any TDL function is invoked:
 
-1. `QueryCoordinator` deserializes and validates `QueryJobConfig` and accepts only jobs for the CLP-S storage engine. It constructs the job-wide `ClpSQueryOption` once. After the TDL implementation defines a concrete results-cache variant, the coordinator will also construct one `OutputHandle` and copy it into every archive task.
+1. `QueryCoordinator` deserializes and validates `QueryJobConfig` and accepts only jobs for the `clp-s` storage engine. It constructs the job-wide `ClpSQueryOption` once. After the TDL implementation defines a concrete results-cache variant, the coordinator will also construct one `OutputHandle` and copy it into every archive task.
 2. The coordinator interprets a missing dataset selection as the default dataset, deduplicates and validates explicitly selected datasets, and queries their archive-metadata tables. It may preserve the missing selection as `None` in the task input; `None` is the wire representation of the default dataset. When more than one dataset is selected, it combines the per-dataset `SELECT` statements with `UNION ALL`, includes the dataset name with every selected row, and globally orders the rows by `end_timestamp DESC`.
 3. The coordinator applies the query time range and archive-retention cutoff while selecting archives. Each matching archive becomes an `ArchiveMetadata` value containing its non-empty `ArchiveId`, optional non-empty dataset, and compressed size in bytes. `None` denotes the default dataset; `Some(dataset)` denotes an explicitly named dataset. `ArchiveId` is currently an alias for `NonEmptyString`.
 4. The coordinator pairs each `ArchiveMetadata` value with the `ExecutionPolicy` for that archive and gives the prepared vector to `QueryJobHandle`, which calls the `QueryJobSubmitter` trait. In production, the trait implementation for `SpiderClient` creates one graph node per pair, attaches the paired policy to that node, and serializes only the TDL inputs as the node's MessagePack payload. Archive size and execution policy remain coordinator-side graph-construction metadata; the vector itself is not sent to a TDL function.
@@ -260,7 +260,7 @@ There is no query-side analogue of `CompressionTaskOutput`. `CompressionTaskOutp
 
 - `ClpSQueryOption` is **job-wide query behavior**. The coordinator constructs it once from the query-job configuration, and the submitter copies the same value into every archive node. Its fields determine what clp-s searches for and how it evaluates the query: query string, result limit, time bounds, and case sensitivity.
 - `OutputHandle` is the **reserved job-wide result destination**. Once concrete variants are defined, one value will be constructed and copied into every archive node. It selects where clp-s writes results rather than how clp-s evaluates the query. The current empty enum records this ownership boundary without yet specifying a handler.
-- `dataset: Option<NonEmptyString>` and `archive_id: NonEmptyString` are **per-node archive context**. The coordinator obtains them from archive selection, and each graph node receives the pair identifying the one archive that it must search. `None` means the default dataset; `Some(dataset)` names an explicit dataset. Nodes in the same query graph share one `ClpSQueryOption` and one `OutputHandle` but may have different datasets and always have independently selected archive IDs.
+- `dataset: Option<NonEmptyString>` and `archive_id: ArchiveId` are **per-node archive context**. The coordinator obtains them from archive selection, and each graph node receives the pair identifying the one archive that it must search. `None` means the default dataset; `Some(dataset)` names an explicit dataset. Nodes in the same query graph share one `ClpSQueryOption` and one `OutputHandle` but may have different datasets and always have independently selected archive IDs.
 
 `dataset` therefore MUST NOT be added to `ClpSQueryOption`. It does not change query matching semantics; it locates the selected archive and labels that archive's MongoDB result documents. Keeping it as a separate task argument also makes the task payload's three parts explicit:
 
@@ -283,7 +283,7 @@ pub(crate) fn clp_s_search_task(
     query_job_id: QueryJobId,
     clp_s_query_option: ClpSQueryOption,
     dataset: Option<NonEmptyString>,
-    archive_id: NonEmptyString,
+    archive_id: ArchiveId,
     output_handle: OutputHandle,
 ) -> Result<(), TdlError>;
 ```
@@ -356,4 +356,4 @@ The implementation MUST construct the argument vector without a shell, wait for 
 
 Compression has a separate `compression::commit` termination task because its archive tasks return `CompressionTaskOutput` values containing newly created archive metadata. A Spider worker running `compression::commit` gathers those outputs, publishes the archives, and marks the compression job successful in MySQL. Therefore, compression-job success is committed from the worker side.
 
-The query data path has no equivalent publication boundary. Each CLP-S archive task writes its final query results directly to the MongoDB results cache, so a standalone query commit task would have no result payload to publish. The query graph consequently contains only archive-query nodes. When Spider reports that the graph succeeded, `QueryJobHandle`—the query job handler—MUST mark the MySQL query-job row `SUCCEEDED` and record its completed duration. If Spider reports graph failure or unexpected cancellation, the handler MUST mark the row `FAILED` instead. The handler is therefore responsible for ensuring that every MVP query job whose Spider graph terminates reaches either `SUCCEEDED` or `FAILED` in MySQL. A future cancellation-capable phase may also use `CANCELLED`; `KILLED` is not part of the query-job status model.
+The query data path has no equivalent publication boundary. Each `clp-s` archive task writes its final query results directly to the MongoDB results cache, so a standalone query commit task would have no result payload to publish. The query graph consequently contains only archive-query nodes. When Spider reports that the graph succeeded, `QueryJobHandle`—the query job handler—MUST mark the MySQL query-job row `SUCCEEDED` and record its completed duration. If Spider reports graph failure or unexpected cancellation, the handler MUST mark the row `FAILED` instead. The handler is therefore responsible for ensuring that every MVP query job whose Spider graph terminates reaches either `SUCCEEDED` or `FAILED` in MySQL. A future cancellation-capable phase may also use `CANCELLED`; `KILLED` is not part of the query-job status model.
