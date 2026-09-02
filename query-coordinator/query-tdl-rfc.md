@@ -138,7 +138,7 @@ query::clp_s_search
 
 #### 6.1.1 Execution policy
 
-The coordinator-side `QueryJobSubmitter for SpiderClient` implementation attaches execution policy to the graph descriptors; execution policy is not a TDL argument. The initial MVP policies are:
+The coordinator-side `QueryJobSubmitter for SpiderClient` implementation receives each archive's metadata paired with its execution policy and attaches that policy to the archive's graph descriptor. Execution policy is not a TDL argument. Keeping it per archive allows planning to account for archive characteristics such as compressed size. The initial MVP policies are:
 
 | Task | `max_num_instances` | `max_num_retry` | Soft / hard timeout | Rationale |
 | --- | ---: | ---: | ---: | --- |
@@ -156,16 +156,16 @@ Preprocessing happens before any TDL function is invoked:
 
 1. `QueryCoordinator` deserializes and validates `QueryJobConfig` and accepts only jobs for the CLP-S storage engine. It constructs the job-wide `ClpSQueryOption` once. After the TDL implementation defines a concrete results-cache variant, the coordinator will also construct one `OutputHandle` and copy it into every archive task.
 2. The coordinator interprets a missing dataset selection as the default dataset, deduplicates and validates explicitly selected datasets, and queries their archive-metadata tables. It may preserve the missing selection as `None` in the task input; `None` is the wire representation of the default dataset. When more than one dataset is selected, it combines the per-dataset `SELECT` statements with `UNION ALL`, includes the dataset name with every selected row, and globally orders the rows by `end_timestamp DESC`.
-3. The coordinator applies the query time range and archive-retention cutoff while selecting archives. The resulting in-memory mapping has one `(Option<NonEmptyString>, NonEmptyString)` dataset/archive pair per matching archive. `None` denotes the default dataset; `Some(dataset)` denotes an explicitly named dataset.
-4. `QueryCoordinator` gives the prepared inputs to `QueryJobHandle`, which calls the `QueryJobSubmitter` trait. In production, the trait implementation for `SpiderClient` creates one graph node per input and serializes that input as the node's MessagePack payload. The vector itself is not sent to a TDL function.
+3. The coordinator applies the query time range and archive-retention cutoff while selecting archives. Each matching archive becomes an `ArchiveMetadata` value containing its non-empty `ArchiveId`, optional non-empty dataset, and compressed size in bytes. `None` denotes the default dataset; `Some(dataset)` denotes an explicitly named dataset. `ArchiveId` is currently an alias for `NonEmptyString`.
+4. The coordinator pairs each `ArchiveMetadata` value with the `ExecutionPolicy` for that archive and gives the prepared vector to `QueryJobHandle`, which calls the `QueryJobSubmitter` trait. In production, the trait implementation for `SpiderClient` creates one graph node per pair, attaches the paired policy to that node, and serializes only the TDL inputs as the node's MessagePack payload. Archive size and execution policy remain coordinator-side graph-construction metadata; the vector itself is not sent to a TDL function.
 5. All archive nodes for the query job are registered in one Spider graph; the coordinator does not divide them into sequential dispatch batches. A graph may contain archive tasks for different datasets.
 6. Spider reports graph success only after every archive-query node succeeds. `QueryJobHandle` uses this terminal graph state, rather than a termination task output, to update the MySQL query-job row to `SUCCEEDED`. A failed or unexpectedly cancelled Spider graph is updated to `FAILED` in the MVP.
 
-The planning-time SQL `UNION ALL` combines only archive-metadata rows from the selected datasets; it does not combine query results. The coordinator flattens the selected rows into one ordered vector of dataset/archive pairs, and the submitter creates one logical graph node from each pair. A node receives only its optional scalar `dataset` and non-empty `archive_id` alongside the job-wide `ClpSQueryOption` and `OutputHandle`, never the complete vector or a dataset-to-archives map. The result-level union is the per-query MongoDB collection: every node writes to collection `<query_job_id>` and records the resolved dataset name in each result document.
+The planning-time SQL `UNION ALL` combines only archive-metadata rows from the selected datasets; it does not combine query results. The coordinator flattens the selected rows into one ordered vector of `(ArchiveMetadata, ExecutionPolicy)` pairs, and the submitter creates one logical graph node from each pair. A node receives only the metadata's optional scalar `dataset` and non-empty `archive_id` alongside the job-wide `ClpSQueryOption` and `OutputHandle`; archive size is not a TDL input. The result-level union is the per-query MongoDB collection: every node writes to collection `<query_job_id>` and records the resolved dataset name in each result document.
 
 #### 6.1.3 Graph shape
 
-Each `(dataset, archive_id)` entry produced by preprocessing becomes one independent `query::clp_s_search` node. The graph contains no join or commit task. The following diagram shows the graph shape for three archives selected from two datasets:
+Each `(ArchiveMetadata, ExecutionPolicy)` pair produced by preprocessing becomes one independent `query::clp_s_search` node. The graph contains no join or commit task. The following diagram shows the graph shape for three archives selected from two datasets:
 
 ```mermaid
 flowchart LR
