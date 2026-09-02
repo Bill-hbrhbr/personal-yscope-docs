@@ -242,7 +242,7 @@ pub enum OutputHandle {
 }
 ```
 
-This example is theoretical: it does not register these variants, prescribe their payloads, or bring file and network output into the MVP. The initial implementation is expected to add only the variant needed for the results-cache path. Keeping handler selection outside the task name allows future handlers to be added without renaming the Spider-visible search task.
+This example is theoretical: it does not register these variants, prescribe their payloads, or bring file and network output into the MVP. The initial implementation is expected to add only the variant needed for the results-cache path. Keeping handler selection outside the task name allows future handlers to be added without renaming the Spider-visible query task.
 
 The relationship to the existing compression wire types is:
 
@@ -288,7 +288,7 @@ pub(crate) fn clp_s_search_task(
 ) -> Result<(), TdlError>;
 ```
 
-The task executes exactly one clp-s query against exactly one archive in one resolved dataset. `clp_s_query_option` is the job-wide search behavior; `dataset` and `archive_id` identify the per-node archive target; `output_handle` selects the clp-s output handler that receives the results. The task resolves `dataset: None` to `default` before constructing the archive locator or clp-s arguments. Different invocations in the same graph reuse the same options and output handle but may use different datasets and archive IDs.
+The task executes exactly one clp-s query against exactly one archive in one resolved dataset. `clp_s_query_option` is the job-wide query behavior; `dataset` and `archive_id` identify the per-node archive target; `output_handle` selects the clp-s output handler that receives the results. The task resolves `dataset: None` to `default` before constructing the archive locator or clp-s arguments. Different invocations in the same graph reuse the same options and output handle but may use different datasets and archive IDs.
 
 #### 6.3.2 Inputs and exact uses
 

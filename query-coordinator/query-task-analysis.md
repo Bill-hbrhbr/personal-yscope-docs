@@ -1,6 +1,6 @@
-# CLP search task: inputs, environment, outputs, and side effects
+# CLP query task: inputs, environment, outputs, and side effects
 
-Research input for the design of a Rust **search-coordinator** (analogous to `components/compression-coordinator`) and a Spider **TDL search task** (analogous to the compression task in `components/clp-tdl-package`).
+Research input for the design of a Rust **query-coordinator** (analogous to `components/compression-coordinator`) and a Spider **TDL query task** (analogous to the compression task in `components/clp-tdl-package`).
 
 Everything below is derived from source on branch `docs/2026-08-04-spider-helm-guide`. Every non-obvious claim carries a `path:line` citation.
 
@@ -28,11 +28,11 @@ Code paths excluded by the scope, listed so they can be deliberately *not* porte
 
 One consequence worth stating up front: **result-cache output is not the default today.** The Rust api-server maps `write_to_file: !value.buffer_results_in_mongodb` (`components/api-server/src/client.rs:219`) and `buffer_results_in_mongodb` is a bare `#[serde(default)] bool` (`client.rs:203-207`), i.e. `false`. So an api-server caller gets **file output** unless it explicitly passes `buffer_results_in_mongodb: true`. Only the webui (`webui/packages/server/src/routes/api/search/index.ts:75-105`) and the MCP server (`clp-mcp-server/clp_mcp_server/clp_connector.py:60-69`) submit result-cache jobs today; the CLI (`clp-package-utils/clp_package_utils/scripts/native/search.py:50-59`) always sets `network_address` and therefore never uses the result cache.
 
-## 0. What the search task is, in one paragraph
+## 0. What the query task is, in one paragraph
 
 The Celery-registered task is `job_orchestration.executor.query.fs_search_task.search`, a bound task with 6 required parameters and 1 optional one (`fs_search_task.py:333-343`). It binds structlog context and delegates to `search_entry_point` (`fs_search_task.py:344-356`, entry point at `:254-262`). The entry point reads four env vars, loads a worker config YAML, opens a MySQL connection to write task-status rows, builds an argv for a native binary (`bin/clo` or `bin/clp-s`), spawns it with its stderr redirected to a per-task log file, waits, and maps the child's exit code to SUCCEEDED/FAILED. **The task never sees a search result**: the native binary writes the hits directly into MongoDB. The Python layer's entire contribution to the output is a 3-field status dict.
 
-## 1. What is the input of a search task?
+## 1. What is the input of a query task?
 
 There are three distinct input surfaces: (1.1) the per-job config blob, (1.2) the per-task Celery kwargs, and (1.3) the implicit worker-side configuration that the scheduler never sends. A Spider TDL task must re-supply all three.
 
@@ -124,7 +124,7 @@ clo (unstructured CLP engine), FS archives only:
 
 `--batch-size` is never passed by the task, so the C++ default of 1000 applies on both engines (`core/src/clp_s/CommandLineArguments.hpp:36-42`; `core/src/clp/clo/CommandLineArguments.hpp:40-41`).
 
-## 2. What environment variables does a search task require?
+## 2. What environment variables does a query task require?
 
 ### 2.1 Read directly by the task process
 
@@ -170,7 +170,7 @@ Docker Compose (`tools/deployment/package/docker-compose-all.yaml:441-478`, tele
 
 Helm sets the same set on the query-worker pod (`tools/deployment/package-helm/templates/query-worker-deployment.yaml:31-50`, with helpers at `_helpers.tpl:138-146`, `:474-482`, `:490-497`).
 
-## 3. What is the explicit output of a search task?
+## 3. What is the explicit output of a query task?
 
 ### 3.1 Return value
 
@@ -253,7 +253,7 @@ Semantics that matter for a coordinator:
 | Collection | Written by | Notes |
 | --- | --- | --- |
 | `<job_id>` (per job) | native binary | See 4.1. Created by the **webui** (`webui/.../routes/api/search/index.ts:113`) or the **MCP server** (`clp_connector.py:85`); the api-server and the scheduler rely on Mongo auto-creating it on first insert. |
-| `results-metadata` (`WebUi.results_metadata_collection_name`, `clp_config.py:704`) | webui and MCP only — **never the search task** | Doc `{_id, errorMsg, errorName, lastSignal, numTotalResults?, queryEngine}` (`webui/packages/common/src/metadata.ts:36-43`); inserted at submit with `lastSignal: RESP_QUERYING` (`search/index.ts:116-122`), finalized with `numTotalResults = min(countDocuments, maxNumResults)` (`search/utils.ts:76-91`). MCP hardcodes the collection name (`clp_connector.py:87-94`). |
+| `results-metadata` (`WebUi.results_metadata_collection_name`, `clp_config.py:704`) | webui and MCP only — **never the query task** | Doc `{_id, errorMsg, errorName, lastSignal, numTotalResults?, queryEngine}` (`webui/packages/common/src/metadata.ts:36-43`); inserted at submit with `lastSignal: RESP_QUERYING` (`search/index.ts:116-122`), finalized with `numTotalResults = min(countDocuments, maxNumResults)` (`search/utils.ts:76-91`). MCP hardcodes the collection name (`clp_connector.py:87-94`). |
 | `<aggregation_job_id>` | reducer / clp-s aggregation sink | **Excluded** by assumption (b). The webui submits two jobs per user search (`search/index.ts:90-114`). |
 | `stream-files` | `extract_stream` tasks | Not search. The only collection with indexes created by `initialize-results-cache.py:132-137`. |
 
@@ -289,7 +289,7 @@ With probability `query_trace_sampling_probability` (default 0.01) the clp-s chi
 
 ## 5. Mapping onto the Spider TDL task model
 
-The concrete template is `components/clp-tdl-package`, whose compression task is a Rust `#[task]`-annotated function registered through `spider_tdl::register_tdl_package!` (`clp-tdl-package/src/lib.rs:28-32`). Note this is a **different** template from the legacy Python Spider adapter `job_orchestration/executor/compress/spider_compress.py` — the Rust package is the current one and is what a search task should follow.
+The concrete template is `components/clp-tdl-package`, whose compression task is a Rust `#[task]`-annotated function registered through `spider_tdl::register_tdl_package!` (`clp-tdl-package/src/lib.rs:28-32`). Note this is a **different** template from the legacy Python Spider adapter `job_orchestration/executor/compress/spider_compress.py` — the Rust package is the current one and is what a query task should follow.
 
 ### 5.1 How the compression TDL task is shaped
 
@@ -326,10 +326,10 @@ inputs.push(TaskInput::ValuePayload(rmp_serde::to_vec(&clp_s_option)?));
 | Python search-task input | TDL equivalent | Rationale |
 | --- | --- | --- |
 | `job_config_blob: bytes` (msgpack `SearchJobConfig`) | **Task argument**, `ValueTypeDescriptor::struct_from_name("SearchJobConfig")` + `TaskInput::ValuePayload(rmp_serde::to_vec(&cfg))` | The Rust mirror already exists at `clp-rust-utils/src/job_config/search.rs:15-26`, with `aggregation_config: Option<()>`. Under scope (a)+(b) the coordinator should pass a *narrowed* struct instead — see 5.5. |
-| `archive_id: str` (+ `dataset`) | **Task argument**, one task per archive (a new `task_io::search::ArchiveInput`-style struct holding `archive_id` and `dataset: Option<String>`) | Preserves the existing 1-archive-per-task granularity and mirrors `S3InputSource` being the per-task-varying argument on the compression side. |
+| `archive_id: str` (+ `dataset`) | **Task argument**, one task per archive (a new `task_io::query::ArchiveInput`-style struct holding `archive_id` and `dataset: Option<String>`) | Preserves the existing 1-archive-per-task granularity and mirrors `S3InputSource` being the per-task-varying argument on the compression side. |
 | `job_id: str` | **Task argument** (an explicit numeric CLP query-job id), *not* `ctx.job_id` | `ctx.job_id` is the Spider job id; the Mongo collection name must remain the numeric `query_jobs.id` because the GC filters on `isdigit()` (`search_result_garbage_collector.py:51-52`) and because every reader derives the collection name from the SQL job id (`api-server/src/client.rs:638-639`; `webui/.../search/index.ts:113`). |
 | `task_id: int` | **Dropped** or replaced by `ctx.task_id` / `ctx.task_instance_id` | The compression task logs `ctx.job_id`, `ctx.task_id`, `ctx.task_instance_id` (`compress.rs:69-75`) and uses them to name tmp files (`compress.rs:64-67`). Whether `query_tasks` rows survive at all is a design decision (see 6). |
-| `clp_metadata_db_conn_params: dict` | **Config, not an argument** | `SpiderTaskExecutorConfig` already carries `database: Database` (`clp-rust-utils/src/clp_config/package/config.rs:61-66`, `:140-149`). The search task does not need the DB at all if `query_tasks` writes are dropped. |
+| `clp_metadata_db_conn_params: dict` | **Config, not an argument** | `SpiderTaskExecutorConfig` already carries `database: Database` (`clp-rust-utils/src/clp_config/package/config.rs:61-66`, `:140-149`). The query task does not need the DB at all if `query_tasks` writes are dropped. |
 | `results_cache_uri: str` | **Config field to add** | `SpiderTaskExecutorConfig` currently has only `package`, `archive_output`, `tmp_directory`, `database` (`config.rs:61-66`). A `ResultsCache` mirror already exists at `config.rs:274-290` (host/port/db_name, no `retention_period`/`stream_collection_name`) — it needs to be added to `SpiderTaskExecutorConfig` and to the executor's config YAML. Alternatively pass the URI as a task argument; config is more consistent with how `archive_output` is handled. |
 | `worker_config.package.storage_engine`, `archive_output.storage{.type,.directory,.staging_directory,.s3_config}` | **Config** | Already present: `config.package`, `config.archive_output`, plus the resolvers `abs_archive_output_staging(clp_home)` (`config.rs:87-95`) and `resolve_dataset_name` (`clp-rust-utils/src/dataset.rs`, used at `compress.rs:104`). |
 | `query_worker.query_trace_sampling_probability` | **Config field to add** if telemetry sampling is kept | Not currently in `SpiderTaskExecutorConfig`. |
@@ -359,7 +359,7 @@ The Python `QueryTaskResult` dict is largely Celery bookkeeping and does not tra
 - `task_id` is available from `ctx`.
 - `duration` is better emitted as a `tracing` field / OTel histogram than as a return value.
 
-The useful shape is a msgpack `SearchTaskOutput` struct in a new `clp-rust-utils/src/task_io/search.rs`, mirroring `CompressionTaskOutput` (`clp-rust-utils/src/task_io/compression.rs:28-33`), carrying whatever a termination task needs to finalize the job. Concretely, the information that exists today but is *thrown away* and that a coordinator would need for a correct early-exit:
+The useful shape is a msgpack `QueryTaskOutput` struct in a new `clp-rust-utils/src/task_io/query.rs`, mirroring `CompressionTaskOutput` (`clp-rust-utils/src/task_io/compression.rs:28-33`), carrying whatever a termination task needs to finalize the job. Concretely, the information that exists today but is *thrown away* and that a coordinator would need for a correct early-exit:
 
 - `archive_id` (echo);
 - `num_results_written` — **not currently available**: the binaries do not report it, the Python task discards stdout (`fs_search_task.py:307`), and the scheduler recovers it only by `count_documents({})` against Mongo (`query_scheduler.py:959`);
@@ -367,7 +367,7 @@ The useful shape is a msgpack `SearchTaskOutput` struct in a new `clp-rust-utils
 
 Emitting those would require a C++ change (the stdout channel is free — clo already uses it for `--print-ir-stats` ndjson, `core/src/clp/clo/clo.cpp:229-234`) or would have to be replaced by the same Mongo count/sort the scheduler does today.
 
-A `search::commit`-style termination task is the natural place for the per-job finalization the Python scheduler does inline: set `query_jobs.status`, `num_tasks_completed`, `duration` (`query_scheduler.py:1042-1052`), and decide SUCCEEDED vs FAILED from the per-task outputs (`query_scheduler.py:982-995`).
+A `query::commit`-style termination task is the natural place for the per-job finalization the Python scheduler does inline: set `query_jobs.status`, `num_tasks_completed`, `duration` (`query_scheduler.py:1042-1052`), and decide SUCCEEDED vs FAILED from the per-task outputs (`query_scheduler.py:982-995`).
 
 ### 5.5 Narrowing the config struct under the stated scope
 
@@ -382,15 +382,15 @@ Dropping `network_address`, `aggregation_config` and `write_to_file` makes the r
 Status and schema design should follow a minimal-durability rule: persist a job status or supporting column when an external consumer needs to observe it or a restarted coordinator needs it to recover without ambiguity. Keep transient, reconstructible phases—such as graph construction, Spider polling, and commit verification—in the job handle rather than adding public statuses or writing MySQL on every phase change. This reduces unnecessary updates and row contention while still allowing fault tolerance. `spider_id` is a necessary durable addition because it distinguishes reattachment from resubmission after a crash; a separate `POLLING_SPIDER` status would not add recovery information.
 
 - `query_jobs` has no `spider_id` column while `compression_jobs` does (`initialize-orchestration-db.py:131-148` vs `:65-88`) — a schema change is needed to track the Spider job id, mirroring `compression-coordinator/src/job_handle.rs:460-463`.
-- Consumers observe completion **only** by polling `query_jobs.status` until it reaches {SUCCEEDED, FAILED, CANCELLED, KILLED}: webui every 500 ms (`webui/.../QueryJobDbManager/index.ts:95-129`, interval at `typings.ts:4`), the CLI (`clp-package-utils/.../native/utils.py:97-122`), the MCP server every 1 s (`clp-mcp-server/clp_mcp_server/constants.py:7`). A search-coordinator **must** preserve this contract; there is no notification channel out of the scheduler today.
+- Consumers observe completion **only** by polling `query_jobs.status` until it reaches {SUCCEEDED, FAILED, CANCELLED, KILLED}: webui every 500 ms (`webui/.../QueryJobDbManager/index.ts:95-129`, interval at `typings.ts:4`), the CLI (`clp-package-utils/.../native/utils.py:97-122`), the MCP server every 1 s (`clp-mcp-server/clp_mcp_server/constants.py:7`). A query-coordinator **must** preserve this contract; there is no notification channel out of the scheduler today.
 - Cancellation is `query_jobs.status = CANCELLING` set by the submitter (`webui/.../QueryJobDbManager/index.ts:75-83`) and polled by the scheduler (`query_scheduler.py:477-534`). The Spider equivalent has to be designed.
 
-## 6. Open questions / decisions for the search-coordinator
+## 6. Open questions / decisions for the query-coordinator
 
 Genuinely unresolved, in rough priority order.
 
 1. **Are the `query_tasks` status UPDATEs actually being rolled back today, and should the Spider task keep that table at all?** `update_query_task_metadata` never commits and the connection is not autocommit (`executor/query/utils.py:124-141`; `sql_adapter.py:69-73`; `clp_config.py:210`, `:253`). Verified statically only. The query scheduler itself relies on Celery results, not this table (`query_scheduler.py:982-995`), so it may be dead weight — but the webui surfaces `num_tasks`/`num_tasks_completed`, and it is unclear who else reads `query_tasks.status`.
-2. **Does the search-coordinator serve a different API contract than the current api-server default?** Result-cache output requires `buffer_results_in_mongodb: true` today; the default is file output (`api-server/src/client.rs:203-207`, `:219`). Either the coordinator serves only explicit result-cache callers, or the api-server default changes.
+2. **Does the query-coordinator serve a different API contract than the current api-server default?** Result-cache output requires `buffer_results_in_mongodb: true` today; the default is file output (`api-server/src/client.rs:203-207`, `:219`). Either the coordinator serves only explicit result-cache callers, or the api-server default changes.
 3. **Job-id namespace.** Result collections must be all-digits for GC (`search_result_garbage_collector.py:51-52`) and every reader derives the collection name from the SQL `query_jobs.id`. A Spider-native job id cannot replace it. Confirm the coordinator keeps allocating a numeric `query_jobs.id` and passes it as a task argument.
 4. **Who creates the results collection and its indexes?** Today only the webui does both (`search/index.ts:113`, `utils.ts:102-128`); the MCP creates the collection without indexes (`clp_connector.py:85`); the api-server does neither. If the coordinator takes ownership, it also fixes the api-server's unindexed-collection case; if not, api-server jobs keep doing collection scans for the scheduler's timestamp query.
 5. **Early termination without a reducer.** Today it is `found_max_num_latest_results` (`query_scheduler.py:951-973`), which requires (i) archives ordered `end_timestamp DESC` (`query_scheduler.py:575`, `:609`), (ii) sequential sub-job rounds so there is a "highest end timestamp still unsearched" (`query_scheduler.py:1005-1013`), and (iii) reading Mongo between rounds. A Spider task graph that dispatches all archives at once loses (ii) entirely. Also note the existing query looks wrong: `find(sort=..., limit=...).sort(...).limit(1)` — PyMongo `Cursor.sort()`/`Cursor.limit()` replace the `find()` arguments, so the comparison is against the **global minimum** timestamp, not the minimum of the top N. Not executable in this environment; worth a targeted test before porting.
@@ -398,7 +398,7 @@ Genuinely unresolved, in rough priority order.
 7. **Error propagation and per-archive failure policy.** Today one FAILED task fails the whole job (`query_scheduler.py:991-995`). Two cases argue for a per-archive skip instead: clp-s exits 1 when timestamp filters are given and the archive has no authoritative timestamp column (`clp-s.cpp:179-198`), and exit codes differ between binaries (clo 255, clp-s 1). Should the TDL task normalize exit codes, and should the graph tolerate partial failure?
 8. **Timeouts.** The only bound today is Celery's 600 s soft / 1200 s hard (`celeryconfig.py:23-25`). Neither binary self-limits, and the generated `results_cache_uri` carries no MongoDB timeout/write-concern options (`clp_config.py:460-461`). Should the coordinator own URI construction (adding `serverSelectionTimeoutMS`, `socketTimeoutMS`, `w`) and a per-task deadline?
 9. **`directConnection`.** The webui (`mongo.ts:6-12`), api-server (`client.rs:256-259`) and `initialize-results-cache.py:129` all use `directConnection=true` against the single-node replica set `rs0` (`initialize-results-cache.py:79-89`), but `ResultsCache.get_uri()` does not (`clp_config.py:460-461`). Whether a Rust writer needs it in-cluster is unverified.
-10. **Document-schema normalization.** clo and clp-s write different shapes into the same cache (4.1); only `message` is consumed by the api-server, while the MCP reader hard-depends on `archive_id` and `log_event_ix` (`clp_connector.py:163-171`). Should a Spider search task normalize?
+10. **Document-schema normalization.** clo and clp-s write different shapes into the same cache (4.1); only `message` is consumed by the api-server, while the MCP reader hard-depends on `archive_id` and `log_event_ix` (`clp_connector.py:163-171`). Should a Spider query task normalize?
 11. **`--dataset` on the clo engine.** `fs_search_task.py:230-231` appends `--dataset` for any engine, but clo has no such option and rejects unknown handler options (`clp/cli_utils.cpp:6-23`). The invariant "datasets set iff engine is clp-s" is currently upheld only by convention (`api-server/src/client.rs:283-288`). Should the coordinator enforce it?
 12. **Spider task-executor deployment.** No Compose or Helm manifest in this repo defines the Spider task executor's environment, so where `CLP_CONFIG_PATH`, `CLP_HOME`, `RUST_LOG` and the OTel variables are set for it could not be determined from source.
 13. **Cancellation semantics under Spider.** Today cancellation is polled from `query_jobs.status = CANCELLING` and implemented as `revoke(terminate=True)` plus a SIGTERM process-group kill (`query_scheduler.py:477-534`; `executor/query/utils.py:77-90`). There is also a confirmed gap: a job that is CANCELLING but absent from the scheduler's in-memory `active_jobs` (`query_scheduler.py:485-488`) is never transitioned out — `fetch_new_query_jobs` selects only PENDING (`:399-409`) and `kill_hanging_jobs` only RUNNING (`scheduler/utils.py:49-55`). A job cancelled while PENDING, or a CANCELLING row surviving a scheduler restart, stays CANCELLING indefinitely.

@@ -1,6 +1,6 @@
-# Search Coordinator (Rust) — Design
+# Query Coordinator (Rust) — Design
 
-Rewriting the Python **query scheduler** (`components/job-orchestration/job_orchestration/scheduler/query/query_scheduler.py`) as a Rust **search coordinator**. An existing framework can be referenced at `components/compression-coordinator`, though search has more complexities (job categorization, aggregation, decompression, cancellation).
+Rewriting the Python **query scheduler** (`components/job-orchestration/job_orchestration/scheduler/query/query_scheduler.py`) as a Rust **query coordinator**. An existing framework can be referenced at `components/compression-coordinator`, though search has more complexities (job categorization, aggregation, decompression, cancellation).
 
 Scope: the full orchestration lifecycle — concurrency/pool, poll loop, job retirement/updates, sleep/wake cadence, query-table row reading, job categorization, cancellation, aggregation (timeline + other), and decompression. The current celery **reducer subsystem is deleted entirely** and must not be carried over (see §7).
 
@@ -70,7 +70,7 @@ Two storage tiers: a **control plane** (MySQL) the coordinator reads and writes,
 **Data plane** (MongoDB; `clp_config.results_cache`):
 
 - One collection per query job, named by the job id. Contents:
-- matching records (plain search)
+- matching records (non-aggregation query)
 - `{timestamp, count}` timeline documents (aggregation)
 - `results_metadata_collection_name` (`clp_config.webui`) — per-search signal state, keyed by `searchJobId`.
 - `stream_collection_name` — used by decompression jobs.
@@ -84,7 +84,7 @@ Two storage tiers: a **control plane** (MySQL) the coordinator reads and writes,
 | **package `search.py`** | Python | search, **optionally with aggregation** (`aggregation_config` set when `--count` / `--count-by-time` passed) — **one job row** | `submit_query_job` |
 | **package `decompress.py`** | Python | decompression only (`EXTRACT_IR` / `EXTRACT_JSON`) — not search | `submit_query_job` |
 
-- **Search vs. aggregation**: both use `SEARCH_OR_AGGREGATION`. A job with `aggregation_config` set is an aggregation job; otherwise it is a plain search job.
+- **Search vs. aggregation**: both use `SEARCH_OR_AGGREGATION`. A job with `aggregation_config` set is an aggregation job; otherwise it is a non-aggregation query job.
 - **Common job format**: all sources ultimately write the same row format to `QUERY_JOBS_TABLE_NAME`, with a msgpacked `SearchJobConfig`. The coordinator therefore processes jobs based on `type` and `aggregation_config`, regardless of source.
 - **Different aggregation styles**: the webui submits search and aggregation as two separate job rows, while the package combines them into one row using `aggregation_config`. Aggregation goes through the reducer in either case.
 - **Shared package helper**: `submit_query_job` in `clp_package_utils/scripts/native/utils.py` is shared by the package's `search.py` and `decompress.py`.
@@ -182,7 +182,7 @@ Cancellation is a DB write of `status=CANCELLING`; the coordinator polls it (tod
 
 ### 2.3 Webui's paired search + aggregation jobs over the same archives
 
-- The webui submits **two** `QUERY_JOBS_TABLE_NAME` rows per search: `searchJobId` (plain search → results) and `aggregationJobId` (timeline aggregation, `count_by_time_bucket_size` set).
+- The webui submits **two** `QUERY_JOBS_TABLE_NAME` rows per search: `searchJobId` (non-aggregation query → results) and `aggregationJobId` (timeline aggregation, `count_by_time_bucket_size` set).
 - Both rows run over the **same set of archives**; the split is a webui UX concern (separate result streams for results vs. timeline), not a coordinator concept.
 - The two are coupled client-side via `results_metadata_collection_name` (`searchResultsMetadataCollection`) and `updateSearchWhenJobsFinish` — the webui joins their completion to render the search page.
 - To the coordinator these are two independent `SEARCH_OR_AGGREGATION` rows (one with `aggregation_config = None`, one with it set); it does not know they are paired.
@@ -215,9 +215,9 @@ Cancellation is a DB write of `status=CANCELLING`; the coordinator polls it (tod
 
 The structure mirrors the compression-coordinator (poll loop, two-phase fetch, semaphore-bounded concurrency, job-handle lifecycle, a TDL termination/commit task, status updates, and startup recovery).
 
-**Query job status ownership** mirrors compression. The coordinator persists the Spider job id and transitions the CLP query job from `PENDING` to `RUNNING`. Each per-archive `search` TDL task runs clp-s, which writes results directly to MongoDB, and returns only the small completion payload needed by the graph. After all search tasks succeed, Spider runs `search::commit` as the graph's termination task. That TDL function executes on a Spider worker, uses the worker's `SpiderTaskExecutorConfig` plus DB credentials from its environment, reverse-looks up the CLP query job by `spider_id`, locks the row, and CAS-transitions it from `RUNNING` to `SUCCEEDED` with its duration. It does not read or modify the MongoDB results.
+**Query job status ownership** mirrors compression. The coordinator persists the Spider job id and transitions the CLP query job from `PENDING` to `RUNNING`. Each per-archive `search` TDL task runs clp-s, which writes results directly to MongoDB, and returns only the small completion payload needed by the graph. After all query tasks succeed, Spider runs `query::commit` as the graph's termination task. That TDL function executes on a Spider worker, uses the worker's `SpiderTaskExecutorConfig` plus DB credentials from its environment, reverse-looks up the CLP query job by `spider_id`, locks the row, and CAS-transitions it from `RUNNING` to `SUCCEEDED` with its duration. It does not read or modify the MongoDB results.
 
-The coordinator continues polling Spider until the graph is terminal. On success it verifies that `search::commit` has already committed `SUCCEEDED`; it does not perform a second success write. If Spider fails or is unexpectedly cancelled before a successful commit, the coordinator records `FAILED` and a `status_msg`, while first preserving an already-committed `SUCCEEDED` result. This division makes successful publication atomic and idempotent in the worker-side commit transaction while retaining coordinator-side failure reporting and restart recovery.
+The coordinator continues polling Spider until the graph is terminal. On success it verifies that `query::commit` has already committed `SUCCEEDED`; it does not perform a second success write. If Spider fails or is unexpectedly cancelled before a successful commit, the coordinator records `FAILED` and a `status_msg`, while first preserving an already-committed `SUCCEEDED` result. This division makes successful publication atomic and idempotent in the worker-side commit transaction while retaining coordinator-side failure reporting and restart recovery.
 
 The Rust job handle should follow the persistence restraint from §2.1. Its async control flow can represent preparation, submission, Spider polling, and commit verification without adding those phases to `QueryJobStatus` or writing them to MySQL. Persist additional state only when it closes a real crash-recovery ambiguity.
 
@@ -227,9 +227,9 @@ MVP features:
 - **Two-phase fetch** — re-dispatch `PENDING` rows already marked for dispatch, then fetch new `PENDING` rows up to the available concurrency permits.
 - **Job categorization** — deserialize msgpack `job_config` and branch on `type` + `aggregation_config`; MVP accepts only `SEARCH_OR_AGGREGATION` with `aggregation_config = None` and leaves the rest for later phases (returned as unsupported).
 - **Concurrency control** — a semaphore bounding in-flight jobs, with a permit owned by each job handle.
-- **Dispatch** — submit a graph containing one `search` task per archive plus a `search::commit` termination task, persist the Spider job id, and mark the row `RUNNING` with `start_time`/`num_tasks`.
+- **Dispatch** — submit a graph containing one `search` task per archive plus a `query::commit` termination task, persist the Spider job id, and mark the row `RUNNING` with `start_time`/`num_tasks`.
 - **In-flight tracking** — poll Spider job state (idempotent start, exponential backoff) until terminal.
-- **Job completion** — `search::commit` writes `SUCCEEDED` and `duration` transactionally after all search tasks succeed; on graph failure, the coordinator writes `FAILED` and `status_msg`. Results already sit in the results cache (per-job collection) written by clp-s; neither the coordinator nor the commit task touches them.
+- **Job completion** — `query::commit` writes `SUCCEEDED` and `duration` transactionally after all query tasks succeed; on graph failure, the coordinator writes `FAILED` and `status_msg`. Results already sit in the results cache (per-job collection) written by clp-s; neither the coordinator nor the commit task touches them.
 - **Startup recovery** — re-attach to `RUNNING` rows that already have a Spider job id, so a coordinator restart doesn't drop in-flight jobs.
 - **Schema additions** — `QUERY_JOBS_TABLE_NAME` gains `status_msg`, `update_time`, `spider_id`, `dispatch_time` + indices, aligned with the compression jobs table.
 
@@ -341,17 +341,17 @@ Other notes:
 
 The rewrite is a three-part project:
 
-1. **search-coordinator** — polling, job categorization, and status-update logic. This is the focus of this section. A naive baseline exists on branch `search-coordinator/init` (`components/search-coordinator`).
-2. **clp-tdl-package** — search task signatures, mirroring the existing compression tasks (out of scope for this doc).
+1. **query-coordinator** — polling, job categorization, and status-update logic. This is the focus of this section. A naive baseline exists on branch `query-coordinator/init` (`components/query-coordinator`).
+2. **clp-tdl-package** — query task signatures, mirroring the existing compression tasks (out of scope for this doc).
 3. **The bridge** — task-input construction and submission connecting 1 → 2 (out of scope for this doc).
 
-### Part 1 baseline — branch `search-coordinator/init`
+### Part 1 baseline — branch `query-coordinator/init`
 
 The branch reuses the structure of the **compression-coordinator**, already Spider-based (this settles the old "Celery vs Rust worker" question: tasks go to Spider). What it already has:
 
 | Area | On the branch | Reference in compression-coordinator |
 |---|---|---|
-| Poll loop | `SearchCoordinator::run`: `select!` on `CancellationToken`; `saturating_sub` sleep; deferred `mark_jobs_dispatched` | `Coordinator::run` |
+| Poll loop | `QueryCoordinator::run`: `select!` on `CancellationToken`; `saturating_sub` sleep; deferred `mark_jobs_dispatched` | `Coordinator::run` |
 | Two-phase fetch | `fetch_new_job_rows`: first fetch = PENDING + `dispatch_time IS NOT NULL` (re-dispatch, no LIMIT); subsequent = PENDING + `dispatch_time IS NULL` `LIMIT available_permits()` | same function, same queries |
 | Concurrency | `Semaphore(max_concurrent_jobs)`; owned permit moved into each spawned handle | `schedule_new_jobs` |
 | Recovery | `fetch_submitted_running_jobs` (RUNNING + `spider_id IS NOT NULL`) → `QueryJobHandle::recover` per job | same (replaces Python `kill_hanging_jobs`) |
@@ -359,7 +359,7 @@ The branch reuses the structure of the **compression-coordinator**, already Spid
 | Status updates | `persist_spider_job_id` (→ RUNNING + `start_time` + `num_tasks` + COALESCE `dispatch_time`), `update_job_status`, `mark_job_failed` | same |
 | Submitter | `QueryJobSubmitter` trait; `run_query_job_to_completion` (idempotent start + exponential-backoff job-state polling) implemented; `submit_query_job` is `todo!()` (parts 2–3) | submitter trait pattern |
 | Schema | `QUERY_JOBS_TABLE_NAME` gains `status_msg`, `update_time`, `spider_id`, `dispatch_time` + matching indices — aligned with `compression_jobs` | `compression_jobs` columns |
-| Config | `SearchCoordinator` config: `max_concurrent_jobs`, `job_polling_interval_millisecs`, `result_polling` backoff, task retries/timeouts, `resource_group` | `CompressionCoordinator` config |
+| Config | `QueryCoordinator` config: `max_concurrent_jobs`, `job_polling_interval_millisecs`, `result_polling` backoff, task retries/timeouts, `resource_group` | `CompressionCoordinator` config |
 | ID/status types | `QueryJobId = i32`; `QueryJobStatus` as a typed `sqlx::Type` enum | `CompressionJobId` / `CompressionJobStatus` |
 
 ### Part 1 gaps — what the branch does not do yet
@@ -375,17 +375,17 @@ The branch treats every `QUERY_JOBS_TABLE_NAME` row identically; **job categoriz
 
 Part-1 work on top of the baseline, in order: widen the fetch projection (`type`, `job_config`, `creation_time`); categorize in `QueryJobHandle::new` (`type` → config variant → `aggregation_config` branch), returning `UnsupportedInputConfig` for not-yet-supported categories; write `QUERY_TASKS_TABLE_NAME` rows and a real `num_tasks`; add the CAS guard on status transitions; then the MVP+1 cancellation scan.
 
-### MVP — plain search end-to-end (detailed)
+### MVP — non-aggregation query end-to-end (detailed)
 
 The core path for a `SEARCH_OR_AGGREGATION` job with `aggregation_config = None`. This is what MVP must implement.
 
-| Step | Old (Python query scheduler) | New (Rust search coordinator) |
+| Step | Old (Python query scheduler) | New (Rust query coordinator) |
 |---|---|---|
 | Discover | `fetch_new_query_jobs`: `SELECT ... FROM QUERY_JOBS_TABLE_NAME WHERE status=PENDING` (MySQL control plane) | unchanged — poll `PENDING` rows from MySQL |
 | Read row | `job_config` MEDIUMBLOB, **plain msgpack**; `msgpack.unpackb` → `SearchJobConfig` (Pydantic) | serde + `rmp-serde` (**plain msgpack, not Brotli**) → `SearchJobConfig` |
-| Categorize | by `type` + `aggregation_config is None` → plain search | same; MVP handles only this branch |
+| Categorize | by `type` + `aggregation_config is None` → non-aggregation query | same; MVP handles only this branch |
 | Plan work | `get_archives_for_search` / `_get_archives_for_search_without_datasets` resolve target archives; retention lower-bound from `creation_time` + `archive_retention_period` | same query logic in sqlx |
-| Dispatch | `insert_query_tasks_into_db` (one `QUERY_TASKS_TABLE_NAME` row per archive); `celery.group(search.s(...) per archive).apply_async()`; `GroupResult.save()` | insert task rows; submit the search task graph to **Spider** via `QueryJobSubmitter::submit_query_job` (parts 2–3; `todo!()` on the branch); **no `GroupResult` rehydration** — the handle stays in-process |
+| Dispatch | `insert_query_tasks_into_db` (one `QUERY_TASKS_TABLE_NAME` row per archive); `celery.group(search.s(...) per archive).apply_async()`; `GroupResult.save()` | insert task rows; submit the query task graph to **Spider** via `QueryJobSubmitter::submit_query_job` (parts 2–3; `todo!()` on the branch); **no `GroupResult` rehydration** — the handle stays in-process |
 | Execute | clp-s `search` celery task per archive; output handler = `results-cache` → writes matches to Mongo collection `<job_id>` | **data plane unchanged**: clp-s workers still use the `results-cache` handler → Mongo collection `<job_id>` |
 | Retire | `check_job_status_and_update_db` polls the rehydrated `GroupResult`; `handle_finished_search_job` updates `QUERY_JOBS_TABLE_NAME`/`QUERY_TASKS_TABLE_NAME` | per-job handle: `to_completion` polls Spider job state with exponential backoff (implemented on the branch); updates `QUERY_JOBS_TABLE_NAME` (SUCCEEDED/FAILED) + `QUERY_TASKS_TABLE_NAME`; permit released on handle exit |
 | Max-results short-circuit | `found_max_num_latest_results` reads Mongo `<job_id>` (sort by `timestamp` desc, limit) | unchanged — read Mongo `<job_id>` |
@@ -414,7 +414,7 @@ Open (§7): how clp-s workers return per-archive bucket counts to the coordinato
 
 ### Concurrency, polling, retirement, sleep
 
-| Old query scheduler (Python) | New search coordinator (Rust) |
+| Old query scheduler (Python) | New query coordinator (Rust) |
 |---|---|
 | `ProcessPoolExecutor(scheduler_concurrency)` for blocking dispatch | tokio tasks; no process pool |
 | `scheduler_concurrency` (pool size) | `Semaphore(max_concurrent_jobs)`; `available_permits()` bounds the pending-fetch `LIMIT` |
@@ -434,7 +434,7 @@ Open (§7): how clp-s workers return per-archive bucket counts to the coordinato
 
 ### Query-table row reading
 
-| Old query scheduler (Python) | New search coordinator (Rust) |
+| Old query scheduler (Python) | New query coordinator (Rust) |
 |---|---|
 | `fetch_new_query_jobs`: `SELECT id, job_config, type, creation_time FROM QUERY_JOBS_TABLE_NAME WHERE status=PENDING` | branch's `fetch_new_job_rows` projects only `id` — **widen to `type`, `job_config`, `creation_time`** (part-1 gap) |
 | `fetch_cancelling_search_jobs`: `SELECT id FROM QUERY_JOBS_TABLE_NAME WHERE status=CANCELLING AND type=SEARCH_OR_AGGREGATION` | cancellation handled by a background scan coroutine (see §5) |
@@ -449,7 +449,7 @@ Open (§7): how clp-s workers return per-archive bucket counts to the coordinato
 
 | `QueryJobType` value | Old handling | New handling |
 |---|---|---|
-| `SEARCH_OR_AGGREGATION`, `aggregation_config=None` | plain search via `search` celery task | **MVP**: the supported path; per-job task dispatches clp-s search batches |
+| `SEARCH_OR_AGGREGATION`, `aggregation_config=None` | non-aggregation query via `search` celery task | **MVP**: the supported path; per-job task dispatches clp-s search batches |
 | `SEARCH_OR_AGGREGATION`, `aggregation_config` set, `do_count_aggregation`/`count_by_time_bucket_size` | reducer subprocess (celery) | **MVP+2**: clp-s native timeline aggregation; no reducer |
 | `SEARCH_OR_AGGREGATION`, other aggregation | reducer subprocess (celery) | **MVP+N**: Spider-backed; blocked on Spider; until then, leave for celery or mark unsupported |
 | `EXTRACT_IR` | `extract_stream` celery task (IR extraction) | **MVP+3** (decompression); wave to celery until then |
@@ -472,7 +472,7 @@ Categorization point: read `type` first, then deserialize `job_config` into the 
 
 ### Cancellation
 
-| Old query scheduler (Python) | New search coordinator (Rust) |
+| Old query scheduler (Python) | New query coordinator (Rust) |
 |---|---|
 | `fetch_cancelling_search_jobs` polled inside `handle_job_updates` every `jobs_poll_delay` | **MVP+1**: a background coroutine scans `QUERY_JOBS_TABLE_NAME` for `status=CANCELLING` on its own cadence (or shares the outer poll) |
 | `cancel_job_except_reducer` revokes the Celery task; `release_reducer_for_job` sends a reducer FAILURE | per-job `CancellationToken`; abort the in-flight search; **no reducer release** |
@@ -484,7 +484,7 @@ Categorization point: read `type` first, then deserialize `job_config` into the 
 
 ### Telemetry
 
-| Old query scheduler (Python) | New search coordinator (Rust) |
+| Old query scheduler (Python) | New query coordinator (Rust) |
 |---|---|
 | `clp.query.active_jobs`, `clp.query.outstanding_tasks` (observable up-down counters, callbacks read `active_jobs`) | same metrics via `opentelemetry` + `opentelemetry-otlp` Rust crates; `ObservableUpDownCounter` callbacks |
 | `clp.query.tasks.completed`, `clp.query.tasks.failed` (counters) | same |
@@ -523,7 +523,7 @@ The reducer's role is **not** absorbed by the coordinator. The coordinator never
 
 ## _7. Open questions
 
-- **Retire model** *(settled on branch `search-coordinator/init`)*: per-handle self-retirement — `QueryJobHandle::to_completion` polls Spider job state inside the spawned task.
+- **Retire model** *(settled on branch `query-coordinator/init`)*: per-handle self-retirement — `QueryJobHandle::to_completion` polls Spider job state inside the spawned task.
 - **Result backend** *(settled)*: tasks are submitted to **Spider**, not Celery — `QueryJobSubmitter` polls Spider job state; no `GroupResult`-style handles.
 - **Cross-job shared state**: container choice (`DashMap` vs. `Mutex`) for dedup/metrics; confirm what must be visible across jobs.
 - **Decompression + Spider**: same task type as search or distinct; shared vs. separate resource group (default: separate). Resolve at MVP+3 with Spider scheduling design.

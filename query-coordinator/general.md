@@ -48,9 +48,9 @@ The query task receives `max_num_results` as an optional value. Its behavior is 
 
 The three layers therefore have the following responsibilities:
 
-1. **API server:** If the product needs to enforce a default result limit, the API server should do so explicitly by setting `Some(max_num_results)` in the query configuration. Search requests are expected to enter through the API server, including requests originating from the WebUI, so this layer is the appropriate place to define and document service-level policy.
+1. **API server:** If the product needs to enforce a default result limit, the API server should do so explicitly by setting `Some(max_num_results)` in the query configuration. Query requests are expected to enter through the API server, including requests originating from the WebUI, so this layer is the appropriate place to define and document service-level policy.
 2. **Query task:** The task preserves the configuration's simple optional semantics. `Some` produces the clp-s flag and `None` produces no flag. It neither chooses a default limit nor interprets `None` as a particular number.
-3. **clp-s:** clp-s determines what happens when `--max-num-results` is absent. It currently defaults to 1000 results, so omitting the flag produces the same effective limit as the current search scheduler. However, enforcing a service-level default is not clp-s's responsibility.
+3. **clp-s:** clp-s determines what happens when `--max-num-results` is absent. It currently defaults to 1000 results, so omitting the flag produces the same effective limit as the current query scheduler. However, enforcing a service-level default is not clp-s's responsibility.
 
 In the future, clp-s may change its no-flag behavior to mean that the number of results is unlimited. That change would be isolated to clp-s: the query task would continue to omit the flag for `None`, and the coordinator contract would remain unchanged. A deployment that still wants a bounded default would have the API server supply `Some(max_num_results)` explicitly.
 
