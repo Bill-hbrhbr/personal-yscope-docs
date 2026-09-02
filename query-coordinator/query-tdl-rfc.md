@@ -532,7 +532,7 @@ variant is:
     results-cache
     --uri <results-cache-uri>
     --collection <query-job-id>
-    --max-num-results <n>
+    [--max-num-results <n>]
     --dataset <dataset>
 ```
 
