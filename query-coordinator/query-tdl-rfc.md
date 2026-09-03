@@ -26,8 +26,9 @@ The implementation must satisfy these requirements:
 - The coordinator-side graph builder uses the task name, descriptors, argument order, and
   MessagePack representation specified here.
 - Native query results go directly to MongoDB; they do not pass through Spider outputs.
-- Repeated execution follows the results-cache deduplication contract and is idempotent by logical
-  result identity.
+- Repeated execution follows Zhihao Lin's
+  [results-cache deduplication design](other-authors/zhihao/mongodb-deduplication.md) and is
+  idempotent by logical result identity.
 - Every configuration, process, archive-access, or non-duplicate results-cache failure becomes
   `TdlError::ExecutionError`.
 - Timestamp bounds remain signed Unix epoch milliseconds from the wire type through the `clp-s`
