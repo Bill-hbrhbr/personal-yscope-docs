@@ -1,5 +1,12 @@
 # Query coordinator — MVP PR implementation plan
 
+> **Historical planning document.** The current normative design is split across
+> [Query system architecture](query-system-architecture.md), the
+> [query-job-handler RFC](query-job-handler-rfc.md), and the [query TDL RFC](query-tdl-rfc.md).
+> In particular, the current MVP has no query commit task, excludes cancellation, and handles a
+> valid zero-archive query as coordinator-owned success without Spider submission. Statements below
+> that conflict with those RFCs describe an earlier proposal.
+
 This plan splits the query-coordinator MVP into reviewable PRs. It uses the `query-coordinator/init` branch as a prototype, but does not assume that the prototype's commits are the right merge boundaries. Each PR should leave the repository buildable and include tests for the behavior it introduces.
 
 The authoritative scope is Section 4 of `query-coordinator.md`. The underscore-prefixed legacy appendix in that document is reference material and must not expand the MVP accidentally.
