@@ -100,6 +100,9 @@ inclusive; the coordinator rejects a begin timestamp greater than the end timest
 `NonEmptyString` prevents empty query strings, dataset names, and archive IDs from crossing the task
 boundary, while the coordinator remains responsible for stricter validation.
 
+The ownership and current compatibility issue surrounding the persisted `0` result-limit sentinel
+are documented in [Query task configuration ownership](query-task-configuration-ownership.md).
+
 There is no query equivalent of `CompressionTaskOutput`. Query results are already durable in
 MongoDB, and no downstream graph node consumes an archive task output.
 

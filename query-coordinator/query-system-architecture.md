@@ -1,9 +1,11 @@
 # Query system architecture and component interactions
 
-This document provides shared context for the query coordinator RFCs. It is informative rather
-than normative. The [query-job-handler RFC](query-job-handler-rfc.md) defines job-lifecycle
-behavior, while the [query TDL RFC](query-tdl-rfc.md) defines the Spider graph and worker task
-contract.
+This document provides shared, non-normative context for the query coordinator RFCs:
+
+- The [query-job-handler RFC](query-job-handler-rfc.md) defines job-lifecycle behavior.
+- The [query TDL RFC](query-tdl-rfc.md) defines the Spider graph and worker task contract.
+- [Query task configuration ownership](query-task-configuration-ownership.md) records the
+  cross-layer rules for defaults and optional task settings.
 
 ## MVP scope
 

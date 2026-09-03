@@ -1,4 +1,8 @@
-# General Design Notes
+# Query task configuration ownership
+
+This document records design guidance for configuration that crosses the query request,
+coordinator, Spider task, and execution-binary boundaries. It distinguishes desired ownership from
+current implementation behavior where they differ.
 
 ## Configuration ownership across layers
 
@@ -14,7 +18,7 @@ A default enforced here should be passed downstream as an explicit value. The co
 
 The coordinator should translate the resolved job configuration into an execution plan. It selects work units, constructs task inputs, submits the task graph, observes its outcome, and manages job-level state.
 
-The coordinator should not duplicate defaults owned by the top-level service or the execution binary. It may validate cross-task or job-wide invariants, but it should otherwise preserve the configuration's meaning when constructing task inputs.
+The coordinator should not duplicate defaults owned by the top-level service or the execution binary. It may validate cross-task or job-wide invariants and convert resolved values into their wire representation, but it should otherwise preserve the configuration's meaning when constructing task inputs. In particular, it must not reinterpret a sentinel value unless that conversion is part of an explicit compatibility contract.
 
 ### Task: mechanical translation
 
@@ -39,19 +43,23 @@ This separation keeps product policy at the system boundary, orchestration in th
 
 ## Example: query result limit
 
-Query result-limit behavior spans three layers: the API server, the query task, and clp-s. Each layer has a distinct responsibility so that the task contract does not duplicate policy owned elsewhere.
+Query result-limit behavior spans the API server, query coordinator, query task, and clp-s. Each layer has a distinct responsibility so that the task contract does not duplicate policy owned elsewhere.
 
-The query task receives `max_num_results` as an optional value. Its behavior is deliberately mechanical:
+The query task receives `max_num_results: Option<NonZeroU32>`. Its behavior is deliberately mechanical:
 
 - `Some(max_num_results)` causes the task to pass `--max-num-results <max_num_results>` to the clp-s results-cache output handler.
 - `None` causes the task to omit `--max-num-results` entirely. The task does not replace `None` with a hard-coded value.
 
-The three layers therefore have the following responsibilities:
+The layers therefore have the following responsibilities:
 
-1. **API server:** If the product needs to enforce a default result limit, the API server should do so explicitly by setting `Some(max_num_results)` in the query configuration. Query requests are expected to enter through the API server, including requests originating from the WebUI, so this layer is the appropriate place to define and document service-level policy.
-2. **Query task:** The task preserves the configuration's simple optional semantics. `Some` produces the clp-s flag and `None` produces no flag. It neither chooses a default limit nor interprets `None` as a particular number.
-3. **clp-s:** clp-s determines what happens when `--max-num-results` is absent. It currently defaults to 1000 results, so omitting the flag produces the same effective limit as the current query scheduler. However, enforcing a service-level default is not clp-s's responsibility.
+1. **API server:** For API-originated queries, the API server owns the product default. The current request type deserializes an omitted `max_num_results` as `0`, and `submit_query` replaces `0` with `default_max_num_query_results` before persisting `SearchJobConfig`. The configured default is currently `1000`, so API-originated jobs normally contain an explicit positive limit.
+2. **Other job producers:** Code that inserts `SearchJobConfig` directly into `query_jobs` is itself responsible for resolving product-level semantics. It cannot assume that a legacy `0` sentinel will retain its meaning after conversion to the query task's optional nonzero wire type.
+3. **Query coordinator:** The coordinator converts an already-resolved positive job value to `Some(max_num_results)`. It does not choose the API server's default. A persisted `0` needs an explicitly documented compatibility rule; mapping it to `None` means "omit the flag," not "unlimited."
+4. **Query task:** The task preserves the wire type's optional semantics. `Some` produces the clp-s flag and `None` produces no flag. It neither chooses a default limit nor interprets `None` as a particular number.
+5. **clp-s:** clp-s determines what happens when `--max-num-results` is absent. It currently defaults to `1000` results and rejects an explicit value of `0`. Enforcing a service-level default is not clp-s's responsibility.
 
-In the future, clp-s may change its no-flag behavior to mean that the number of results is unlimited. That change would be isolated to clp-s: the query task would continue to omit the flag for `None`, and the coordinator contract would remain unchanged. A deployment that still wants a bounded default would have the API server supply `Some(max_num_results)` explicitly.
+There is a current interface discrepancy: the API schema describes `0` as "no limit," while the API implementation replaces `0` with the configured default. In addition, legacy direct job producers may still use `0` as an unlimited sentinel. The coordinator implementation must not silently guess between these meanings. The API contract and any supported direct-producer compatibility behavior must be reconciled before `SearchJobConfig.max_num_results` is converted into `ClpSQueryOption.max_num_results`.
+
+In the future, clp-s may change its no-flag behavior to mean that the number of results is unlimited. The query task would continue to omit the flag for `None`. A deployment that requires a stable bounded default would continue to have the API server persist an explicit positive value.
 
 This separation keeps mechanism in the task layer and policy in the top-level service. It also prevents the API server, query coordinator, and task package from each maintaining a duplicate copy of clp-s's current default value.
