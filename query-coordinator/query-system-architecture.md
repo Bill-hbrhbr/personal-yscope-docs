@@ -1,133 +1,98 @@
 # Query system architecture and component interactions
 
-This document provides shared, non-normative context for the query coordinator RFCs:
-
-- The [query-job-handler RFC](query-job-handler-rfc.md) defines job-lifecycle behavior.
-- The [query TDL RFC](query-tdl-rfc.md) defines the Spider graph and worker task contract.
-- [Query task configuration ownership](query-task-configuration-ownership.md) records the
-  cross-layer rules for defaults and optional task settings.
-
-## MVP scope
-
-The MVP supports plain `clp-s` searches whose results are written through the results-cache output
-handler:
-
-- Only archives produced by the `clp-s` storage engine are supported.
-- Query results are written directly to MongoDB collection `<query_job_id>`.
-- Aggregation, reducers, extraction jobs, and non-results-cache output handlers are outside scope.
-- User-requested cancellation is deferred to MVP+1. An unexpected Spider cancellation is treated
-  as a query-job failure in the MVP.
-- The query graph has no commit task. The query-job handler owns the terminal MySQL update after
-  Spider reports the graph outcome.
+- [Configuration ownership](query-task-configuration-ownership.md) — defaults and policy across package boundaries.
+- [MVP design](query-mvp-design.md) — supported behavior and system-wide constraints.
+- [Coordinator planning](query-coordinator-planning-design.md) — admission and archive preparation.
+- [Job-handler RFC](query-job-handler-rfc.md) — durable lifecycle and recovery.
+- [TDL RFC](query-tdl-rfc.md) — graph and task contracts.
+- [Implementation roadmap](query-coordinator-pr-plan.md) — delivery sequence, PR coverage, and remaining work.
 
 ## Components and responsibilities
 
-### `QueryCoordinator`
+### Query producers
 
-The coordinator owns work spanning multiple query jobs:
+API server, web UI, and other producers translate requests into durable query-job configurations.
+They own user-facing policy and defaults and consume job status and search results.
 
-- Poll and categorize pending MySQL query-job rows.
-- Validate the query-job configuration.
-- Select eligible archives using the requested datasets and time range, plus the archive-retention
-  cutoff.
-- Construct job-wide query options and the output handle.
-- Construct one Spider `ExecutionPolicy` for each selected archive.
-- Enforce the coordinator-wide concurrency limit.
-- Create and run a `QueryJobHandle` only when at least one archive was selected.
-- Discover recoverable `RUNNING` rows and reattach handlers to their Spider jobs.
+### QueryCoordinator
 
-### `QueryJobHandle`
+Coordinates work across query jobs:
 
-One handle owns the durable lifecycle of one nonempty, already-planned query job:
+- Discover and categorize pending jobs in MySQL.
+- Validate job configuration and select eligible dataset/archive pairs.
+- Prepare job-wide query options, result destinations, and per-archive execution policies.
+- Bound concurrent jobs and manage handler lifetime.
+- Complete valid queries with no selected archives without dispatching work.
+- Discover recoverable jobs and reattach their handlers to Spider.
 
-- Ask `QueryJobSubmitter` to register the graph with Spider.
-- Persist the Spider job ID and transition the query job from `PENDING` to `RUNNING`.
-- Ask the submitter to idempotently start and monitor the Spider job.
-- Translate Spider's terminal graph outcome into the terminal MySQL query-job status.
-- Resume monitoring an already-submitted job during coordinator recovery.
+### QueryJobHandle
 
-The handle does not categorize query jobs, select archives, construct per-archive policies, or
-construct Spider task descriptors.
+Owns one submitted job's durable lifecycle:
 
-### `QueryJobSubmitter`
+- Register prepared work through the submitter.
+- Persist the Spider job identity and running state.
+- Monitor execution through the submitter.
+- Persist the terminal MySQL outcome.
+- Resume observation after coordinator recovery.
 
-The query coordinator owns this local adapter interface. It separates lifecycle and SQL behavior
-from Spider graph construction:
+Archive selection, graph construction, and result processing are outside the handle.
 
-- `submit_query_job` translates prepared query inputs into a Spider `TaskGraph`, serializes the TDL
-  inputs, and registers the graph.
-- `run_query_job_to_completion` idempotently starts the Spider job, polls its state, and translates
-  the terminal state and error into a query-job outcome.
+### QueryJobSubmitter
 
-Production implements the interface for `SpiderClient`. Tests may use a controlled fake submitter.
-The TDL package does not depend on this interface or on `SpiderClient`.
+Adapts the coordinator's prepared inputs to Spider:
 
-### Spider and the CLP TDL package
+- Construct task descriptors, serialize task inputs, and register the graph.
+- Start and observe the job, translating Spider states into query-job outcomes.
 
-Spider schedules the graph, applies each node's retry, concurrency, and timeout policy, and exposes
-the graph outcome. The CLP TDL package supplies `query::clp_s_search`, which runs one archive query
-on a Spider worker. The task writes results directly to MongoDB and returns only execution success
-or failure to Spider.
+This interface belongs to the coordinator crate. Production uses a SpiderClient implementation;
+controlled implementations can isolate lifecycle behavior during testing.
 
-## End-to-end flow
+### Spider
 
-For a query with one or more eligible archives:
+Owns distributed scheduling, task-instance execution, retries, concurrency, timeouts, and graph state.
+It reports execution outcomes; it does not own CLP query-job status in MySQL.
+
+### CLP TDL package and clp-s
+
+The TDL package registers callable worker tasks and translates their inputs into native execution.
+clp-s reads archives and writes results to the selected destination. Task completion communicates
+execution success or failure to Spider, not the search-result payload.
+
+## Package interactions
+
+- `query-coordinator` contains coordination, job lifecycle, and the Spider adapter.
+- `clp-rust-utils` supplies shared job types, task I/O, and configuration types.
+- `clp-tdl-package` consumes the shared task I/O and worker configuration; it does not depend on
+  the coordinator's submitter interface.
+- Spider client APIs connect the coordinator to scheduling; Spider TDL APIs connect workers to
+  registered functions.
+- `clp-s` owns native archive search and result-output behavior.
+
+Coordinator-only archive metadata and execution policies are graph-building inputs, not worker
+wire arguments. Shared task I/O describes the execution request crossing that boundary.
+[Configuration ownership](query-task-configuration-ownership.md) defines which layer resolves defaults.
+
+## Control and result paths
 
 ```text
-PENDING query_jobs row
-  -> QueryCoordinator validates and selects archives
-  -> QueryCoordinator prepares query inputs and per-archive execution policies
-  -> QueryJobHandle asks QueryJobSubmitter to register the Spider graph
-  -> QueryJobHandle persists spider_id and RUNNING
-  -> QueryJobSubmitter starts and polls the Spider job
-  -> Spider executes one query::clp_s_search node per archive
-  -> each node writes matches directly to MongoDB collection <query_job_id>
-  -> Spider reports the terminal graph outcome
-  -> QueryJobHandle persists SUCCEEDED or FAILED in MySQL
+Query producer -> MySQL -> QueryCoordinator -> QueryJobHandle -> QueryJobSubmitter -> Spider
+                                                                                      |
+                                                                                  TDL task
+                                                                                      |
+                                                                                    clp-s
+                                                                                      |
+                                                                                Results cache
 ```
 
-The control plane flows through MySQL, the coordinator, and Spider. Search results do not return
-through the task graph: they flow directly from each `clp-s` process to MongoDB.
+Completion returns through Spider and the handler to MySQL. Result documents travel directly from
+clp-s to the results cache, independently of the control path.
 
-## Archive planning and the zero-archive path
+## State ownership
 
-The coordinator distinguishes invalid input from a valid query that has no work:
+- MySQL owns durable CLP job identity, status, and recovery information.
+- Spider owns the registered graph's execution state.
+- MongoDB owns cached result documents.
 
-- An explicitly empty dataset list is invalid and fails the query job.
-- A requested dataset that does not exist is invalid and fails the query job.
-- A valid query whose dataset, time-range, and retention filters select no archives succeeds
-  without creating a handler or Spider job.
-- A query that searches archives but finds no matching log events runs normally and succeeds after
-  its Spider graph completes.
-
-For the zero-archive case, the coordinator atomically transitions the row from `PENDING` to
-`SUCCEEDED`, records the current `start_time`, and sets `num_tasks = 0` and `duration = 0`. This
-matches the legacy Celery scheduler. Failure of the compare-and-set means another owner has already
-claimed or completed the row; the coordinator must not overwrite that state.
-
-## Task inputs versus graph metadata
-
-The coordinator passes the following serialized inputs to every archive task:
-
-- The query-job ID.
-- The job-wide `ClpSQueryOption`.
-- The archive's optional dataset and archive ID.
-- The job-wide `OutputHandle`.
-
-Archive compressed size and Spider `ExecutionPolicy` remain coordinator-side graph-construction
-metadata. They are not TDL arguments. Each selected archive is paired with its execution policy so
-planning may account for archive characteristics. `ExecutionPolicy::max_num_retry` is the task's
-retry budget; polling backoff is a separate handler concern.
-
-## Durable state and recovery boundary
-
-MySQL is the durable CLP control plane. The MVP persists only state needed by external consumers or
-recovery:
-
-- `status` records `PENDING`, `RUNNING`, or a terminal result.
-- `spider_id` allows a restarted coordinator to reattach to a submitted job.
-- `start_time`, `duration`, `num_tasks`, and `status_msg` expose lifecycle information.
-
-Spider is authoritative for the submitted graph's execution state. MongoDB is authoritative for
-the query-result documents already written by the archive tasks. Neither the coordinator nor the
-handler reads or rewrites those result documents while completing the job.
+Coordinator and handler completion logic does not read or rewrite search-result documents.
+Job-level destination preparation, such as collection/index setup, is separate from completion.
+Exact state transitions and generation-specific behavior belong in the MVP and component designs.

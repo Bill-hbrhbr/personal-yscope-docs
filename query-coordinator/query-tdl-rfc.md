@@ -5,6 +5,10 @@ Shared architecture and terminology are described in
 [Query system architecture](query-system-architecture.md). Query-job state transitions, recovery, and
 failure reporting are defined in the [query-job-handler RFC](query-job-handler-rfc.md).
 
+[MVP design](query-mvp-design.md) defines the system baseline.
+[Worker execution overview](query-worker-execution-overview.md) links Zhihao's implementation design
+and distinguishes worker execution from coordinator-side graph construction.
+
 ## 1. Scope and requirements
 
 The MVP defines one Spider-visible task:
@@ -76,6 +80,7 @@ It uses these MessagePack-serialized query types from `clp_rust_utils::task_io::
 
 ```rust
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClpSQueryOption {
     pub query_string: NonEmptyString,
     pub max_num_results: Option<NonZeroU32>,
@@ -85,10 +90,18 @@ pub struct ClpSQueryOption {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, tag = "type")]
 pub enum OutputHandle {
-    // The task implementation adds the MVP results-cache variant.
+    #[serde(rename = "results_cache")]
+    ResultsCache { uri: NonEmptyString },
+
+    #[serde(rename = "file")]
+    File,
 }
 ```
+
+[PR #2512](https://github.com/y-scope/clp/pull/2512) implements the results-cache variant with a URI naming the MongoDB database. `File` is
+reserved and rejected by the MVP worker. Query wire structs also reject unknown fields.
 
 `ClpSQueryOption` contains job-wide query behavior and is copied unchanged into every archive node.
 `OutputHandle` is the job-wide result destination and remains separate because it controls where
@@ -141,9 +154,10 @@ default dataset before constructing the archive locator and result metadata.
 | `ignore_case` | Query-job configuration | Adds `--ignore-case` when true. |
 | `output_handle` | Coordinator | Selects the supported `clp-s` output-handler subcommand and supplies its destination configuration. |
 
-Deployment-wide `CLP_HOME`, archive storage, results-cache connection information, and credentials
-come from worker configuration or secrets, not from repeated task inputs. For S3 storage, the task
-resolves credentials and injects them into the child environment.
+Deployment-wide `CLP_HOME`, archive storage, and archive credentials come from worker configuration
+or secrets. The coordinator supplies the results-cache URI explicitly in
+`OutputHandle::ResultsCache { uri }`. For S3 storage, the task resolves credentials and injects them
+into the child environment.
 
 For filesystem archives, the results-cache command shape is:
 
@@ -168,7 +182,7 @@ For S3 archives, the locator becomes:
 ```
 
 The query and results-cache arguments remain unchanged. The implementation constructs the argument
-vector without a shell, waits for the child, and drains its standard streams. Zero matching log
+vector without a shell, waits for the child, discards stdout, and captures stderr. Zero matching log
 events is a successful task execution.
 
 ## 5. Outputs and persistent effects

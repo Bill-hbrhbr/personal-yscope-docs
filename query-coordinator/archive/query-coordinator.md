@@ -1,8 +1,8 @@
 # Query Coordinator (Rust) — Design
 
 > **Context and historical design notes.** The current normative MVP design is split across
-> [Query system architecture](query-system-architecture.md), the
-> [query-job-handler RFC](query-job-handler-rfc.md), and the [query TDL RFC](query-tdl-rfc.md).
+> [Query system architecture](../query-system-architecture.md), the
+> [query-job-handler RFC](../query-job-handler-rfc.md), and the [query TDL RFC](../query-tdl-rfc.md).
 > Where this document differs, those focused documents are authoritative.
 
 Rewriting the Python **query scheduler** (`components/job-orchestration/job_orchestration/scheduler/query/query_scheduler.py`) as a Rust **query coordinator**. An existing framework can be referenced at `components/compression-coordinator`, though search has more complexities (job categorization, aggregation, decompression, cancellation).

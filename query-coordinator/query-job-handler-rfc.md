@@ -5,6 +5,9 @@ This RFC defines the normative lifecycle contract for `QueryJobHandle` and its
 [Query system architecture](query-system-architecture.md). The Spider graph, serialized inputs, and worker
 task behavior are defined in the [query TDL RFC](query-tdl-rfc.md).
 
+[MVP design](query-mvp-design.md) defines the system baseline. This RFC is the target contract;
+[implementation roadmap](query-coordinator-pr-plan.md) records differences in the opened lifecycle PR.
+
 ## 1. Scope
 
 The handler drives one already-planned, nonempty `clp-s` query job from Spider registration through
