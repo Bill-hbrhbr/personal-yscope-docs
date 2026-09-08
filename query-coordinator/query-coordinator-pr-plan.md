@@ -27,34 +27,19 @@ Release timing, prerequisite merges, and repository checks remain separate requi
 | --- | --- | --- | --- |
 | [#2509](https://github.com/y-scope/clp/pull/2509) | Result deduplication, result-consumer updates, and result-cache garbage collection changes. | No prerequisite PR declared; needed for the integrated retry-safe MVP. | Changes requested; a later comment approves the web UI portion, not the full PR. |
 | [#2512](https://github.com/y-scope/clp/pull/2512) | Registered archive-search worker, output-handle variants, and clp-s execution. | #2503 and #2508, explicitly stated in the PR body. | Awaiting review; no submitted reviews at the snapshot. Does not construct Spider graphs. |
-| [#2513](https://github.com/y-scope/clp/pull/2513) | Job lifecycle, SQL persistence, and Spider start/poll/recovery support. | #2504's submitter interface; inferred from the implementation, not explicitly numbered in the body. | Draft, with changes requested. Graph construction is explicitly deferred. See the #2513 checklist under Remaining work. |
+| [#2513](https://github.com/y-scope/clp/pull/2513) | Job lifecycle, SQL persistence, and Spider start/poll/recovery support. | #2504's submitter interface; inferred from the implementation, not explicitly numbered in the body. | Draft, with changes requested. Graph construction is explicitly deferred. |
 
 ### Remaining work
 
-#2513 is an existing PR to update. The four #TBD entries require new PRs; A–D match the dependency
-diagram below. Each item's checklist appears once beneath this table.
+#2513's handler/RFC reconciliation is complete. The four #TBD entries require new PRs; A–D match the
+dependency diagram below. Each item's checklist appears once beneath this table.
 
 | PR | Work item | Delivery |
 | --- | --- | --- |
-| [#2513](https://github.com/y-scope/clp/pull/2513) | Handler/RFC reconciliation | Update existing PR |
 | #TBD | A — Graph submission | New PR |
 | #TBD | B — Admission and archive planning | New PR |
 | #TBD | C — Coordinator service and recovery | New PR |
 | #TBD | D — Deployment and end-to-end integration | New PR |
-
-#### #2513 — Handler/RFC reconciliation
-
-Address handler/RFC differences in the already-open #2513 rather than creating another PR solely
-for reconciliation. Integration must use the final shared and worker contracts, not stacked
-placeholder versions of the task or output handle.
-
-The implementation now uses the established `SpiderOption` name, rejects an empty archive vector
-before registration, and restricts pre-running failure reporting to `PENDING`. These behaviors align
-the opened PR with this RFC; remaining graph-submission work is tracked separately below.
-
-Keep these as explicit reconciliation work, not silently revised requirements or claims that the
-opened PR already matches the RFC. The result-limit difference between Zhihao's planning document
-and #2512 is recorded in the [worker overview](query-worker-execution-overview.md).
 
 #### A — Graph submission
 
