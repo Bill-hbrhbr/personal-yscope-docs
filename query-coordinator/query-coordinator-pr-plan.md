@@ -4,29 +4,35 @@
 - [MVP+1: cancellation](query-mvp-plus-1-cancellation.md) — changes after MVP.
 - [MVP+2: timeline aggregation](query-mvp-plus-2-aggregation.md) — changes after MVP+1.
 
-This roadmap distinguishes behavioral design, code opened for review, and remaining integration.
-PR coverage below reflects the inspected heads on 2026-09-07. All six listed PRs were open and
-unmerged; stacked diffs include prerequisite changes and must not be counted as independent delivery.
+This roadmap distinguishes approved work, opened work still in progress, and PRs yet to be opened.
+Review states and dependency hints were checked on 2026-09-08. All six existing PRs are unmerged.
+Stacked diffs include prerequisite changes and must not be counted as independent delivery.
 
 ## MVP
 
-### Opened PRs
+### Already approved
 
-| PR | Coverage | Boundary |
-| --- | --- | --- |
-| [#2503](https://github.com/y-scope/clp/pull/2503) | Query task signatures and shared I/O types | Task body is a placeholder; not graph construction. |
-| [#2504](https://github.com/y-scope/clp/pull/2504) | Coordinator crate and submitter interface | Spider graph construction/submission remains a placeholder. |
-| [#2508](https://github.com/y-scope/clp/pull/2508) | Shared task utilities for binary paths and S3 credentials | Reusable worker plumbing, not coordination. |
-| [#2509](https://github.com/y-scope/clp/pull/2509) | Compound MongoDB result identities and deduplicated writes | Retry-safe result foundation, not job lifecycle. |
-| [#2512](https://github.com/y-scope/clp/pull/2512) | Registered clp-s search task, output types, and native execution | Worker implementation; no Spider graph builder or job submission. |
-| [#2513](https://github.com/y-scope/clp/pull/2513) | QueryJobHandle, lifecycle SQL, recovery entry point, and Spider start/poll outcomes | Does not supply the coordinator service or implement `submit_query_job`. |
+Approval means a recorded human approval, not that a PR is merged or necessarily merge-ready.
+Release timing, prerequisite merges, and repository checks remain separate requirements.
 
-The worker path and handler foundation are opened, but everything below the handler is not complete:
-`SpiderClient::submit_query_job` still contains `todo!()` in #2513.
+| PR | What it delivers | Dependencies | Review / merge notes |
+| --- | --- | --- | --- |
+| [#2503](https://github.com/y-scope/clp/pull/2503) | Shared query-task signatures and I/O types; task execution remains a placeholder. | No prerequisite PR declared. | [Approved by Zhihao](https://github.com/y-scope/clp/pull/2503#pullrequestreview-5080765967); approval requests merging after v0.14.0. |
+| [#2504](https://github.com/y-scope/clp/pull/2504) | Coordinator crate and submitter interface; graph submission remains a placeholder. | #2503, explicitly stated in the PR body. | [Approved by Zhihao](https://github.com/y-scope/clp/pull/2504#pullrequestreview-5105233872); merge after #2503. |
+| [#2508](https://github.com/y-scope/clp/pull/2508) | Shared worker utilities for binary paths and S3 credentials. | No prerequisite PR declared. | [Approved by Bingran](https://github.com/y-scope/clp/pull/2508#pullrequestreview-5079383951). |
 
-### 1. Reconcile foundational PRs with the MVP contracts
+### In progress
 
-Integrate shared types, worker utilities, deduplication, and lifecycle code without retaining stacked
+| PR | What it delivers | Dependencies | Review / merge notes |
+| --- | --- | --- | --- |
+| [#2509](https://github.com/y-scope/clp/pull/2509) | Result deduplication, result-consumer updates, and result-cache garbage collection changes. | No prerequisite PR declared; needed for the integrated retry-safe MVP. | Changes requested; a later comment approves the web UI portion, not the full PR. |
+| [#2512](https://github.com/y-scope/clp/pull/2512) | Registered archive-search worker, output-handle variants, and clp-s execution. | #2503 and #2508, explicitly stated in the PR body. | Awaiting review; no submitted reviews at the snapshot. Does not construct Spider graphs. |
+| [#2513](https://github.com/y-scope/clp/pull/2513) | Job lifecycle, SQL persistence, and Spider start/poll/recovery support. | #2504's submitter interface; inferred from the implementation, not explicitly numbered in the body. | Draft, with changes requested. Graph construction is explicitly deferred. |
+
+#### Remaining reconciliation in #2513
+
+Address handler/RFC differences in the already-open #2513 rather than creating another PR solely
+for reconciliation. Integration must use the final shared and worker contracts, not stacked
 placeholder versions of the task or output handle.
 
 Known differences from the target job-handler RFC:
@@ -42,7 +48,18 @@ Keep these as explicit reconciliation work, not silently revised requirements or
 opened PR already matches the RFC. The result-limit difference between Zhihao's planning document
 and #2512 is recorded in the [worker overview](query-worker-execution-overview.md).
 
-### 2. Implement graph construction and registration
+### Yet to be opened
+
+A–D are roadmap labels, not assigned GitHub PR numbers.
+
+| Planned PR | What it delivers | Proposed dependencies |
+| --- | --- | --- |
+| A — Graph submission | Serialize archive-task inputs, attach policies, and register a Spider graph. | #2504 and #2512's final task/output contract. |
+| B — Admission and archive planning | Validate jobs and prepare dataset/archive pairs, options, policies, and result destinations. | #2504 and #2512's output-handle types. |
+| C — Coordinator service and recovery | Integrate polling, concurrency, handlers, startup recovery, and shutdown. | A, B, and #2513. |
+| D — Deployment and end-to-end integration | Package and deploy the service; verify worker access, scheduler cutover, and the complete query path. | C and #2509's retry-safe result behavior. |
+
+#### A — Graph submission
 
 Replace the submitter placeholder with one `query::clp_s_search` node per prepared archive.
 
@@ -55,7 +72,7 @@ Replace the submitter placeholder with one `query::clp_s_search` node per prepar
 
 This work consumes the shared/worker contract and submitter interface. It is distinct from #2512.
 
-### 3. Implement coordinator admission and preparation
+#### B — Admission and archive planning
 
 [Coordinator planning](query-coordinator-planning-design.md) defines the target boundary.
 
@@ -68,7 +85,7 @@ This work consumes the shared/worker contract and submitter interface. It is dis
 
 Graph construction and preparation can be developed against their shared interface, then integrated.
 
-### 4. Wire the coordinator service and durable recovery
+#### C — Coordinator service and recovery
 
 Integrate configuration, database credentials, resource-group setup, admission/polling, concurrency,
 handler spawning, and binary startup/shutdown.
@@ -83,7 +100,7 @@ handler spawning, and binary startup/shutdown.
 Prototype code in the archived roadmap is reference material, not proof these pieces are integrated
 into the six opened PRs.
 
-### 5. Verify and deploy the complete MVP
+#### D — Deployment and end-to-end integration
 
 Exercise successful search, no selected archives, no log matches, invalid configuration, unsupported
 categories, retry/deduplication, partial failure, lost SQL transitions, and restart at registration,
@@ -95,6 +112,57 @@ and prevent overlap with the legacy scheduler during cutover. Verify that task h
 leave native child processes running.
 
 These are delivery acceptance checks, not checks performed by this documentation update.
+
+### PR dependency DAG
+
+Arrows point from prerequisite to dependent. Solid arrows are verified existing-PR dependencies;
+dashed arrows are proposed dependencies for unopened PRs. These are integration prerequisites, not
+a requirement to wait before developing against the shared interfaces.
+
+#2504's body names #2503. #2512's body names #2503 and #2508. The #2504-to-#2513 edge follows the
+submitter interface used by the lifecycle implementation; #2513's body does not explicitly list it.
+
+```mermaid
+flowchart TD
+    subgraph Approved["Already approved — unmerged"]
+        P2503["#2503: Shared task contract"]
+        P2504["#2504: Crate and submitter interface"]
+        P2508["#2508: Shared worker utilities"]
+    end
+
+    subgraph Progress["In progress"]
+        P2509["#2509: Result deduplication"]
+        P2512["#2512: Search worker"]
+        P2513["#2513: Job lifecycle"]
+    end
+
+    subgraph Planned["Yet to be opened"]
+        A["A: Graph submission"]
+        B["B: Admission and archive planning"]
+        C["C: Coordinator service and recovery"]
+        D["D: Deployment and end-to-end integration"]
+    end
+
+    P2503 --> P2504
+    P2503 --> P2512
+    P2508 --> P2512
+    P2504 -->|"Submitter interface"| P2513
+
+    P2504 -.-> A
+    P2512 -.->|"Final task and output contract"| A
+    P2504 -.-> B
+    P2512 -.->|"Output-handle types"| B
+
+    A -.-> C
+    B -.-> C
+    P2513 -.-> C
+
+    C -.-> D
+    P2509 -.->|"Retry-safe results"| D
+```
+
+#2509 is not a declared prerequisite of #2512. It is shown as an integration requirement for
+retry-safe results, rather than inventing a worker-PR dependency absent from the PR body.
 
 ## MVP+1: cancellation
 
