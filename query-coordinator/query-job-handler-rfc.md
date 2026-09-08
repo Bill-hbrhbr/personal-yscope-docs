@@ -27,42 +27,40 @@ The handler does not:
 
 ### 2.1 Prepared query inputs
 
-The coordinator passes submission inputs individually. The handler API does not define a
-`QueryPlan` wrapper:
+The coordinator passes submission inputs individually to `new()`. The handle stores them directly,
+alongside its lifecycle dependencies, following the compression handle's constructor-based pattern:
 
 ```rust
-pub struct SpiderPollingOption {
+pub struct SpiderOption {
     pub initial_poll_backoff: Duration,
     pub max_poll_backoff: Duration,
 }
 
 pub struct QueryJobHandle<SubmitterType: QueryJobSubmitter> {
-    // Database, query-job identity, submitter, and polling configuration only.
+    // Lifecycle dependencies, resource group, and the three prepared submission inputs.
 }
 
 impl<SubmitterType: QueryJobSubmitter> QueryJobHandle<SubmitterType> {
-    pub fn new(
+    pub const fn new(
         db_pool: MySqlPool,
         query_job_id: QueryJobId,
         job_submitter: SubmitterType,
-        spider_polling_option: Arc<SpiderPollingOption>,
-    ) -> Self;
-
-    pub async fn run(
-        self,
         resource_group_id: ResourceGroupId,
         clp_s_query_option: ClpSQueryOption,
         output_handle: OutputHandle,
         archives_to_search: Vec<(ArchiveMetadata, ExecutionPolicy)>,
-    ) -> Result<(), Error>;
+        spider_option: Arc<SpiderOption>,
+    ) -> Self;
+
+    pub async fn run(self) -> Result<(), Error>;
 
     pub async fn recover(self, spider_job_id: SpiderJobId) -> Result<(), Error>;
 }
 ```
 
-`run` requires a nonempty `archives_to_search`. The coordinator handles zero selected archives
+For new submission, `run` requires the stored `archives_to_search` to be nonempty. The coordinator handles zero selected archives
 before constructing the handle. Every `ExecutionPolicy` contains the corresponding archive task's
-retry, concurrency, and timeout settings, including `max_num_retry`. `SpiderPollingOption` contains
+retry, concurrency, and timeout settings, including `max_num_retry`. `SpiderOption` contains
 only the backoff used to observe the job and does not duplicate task execution settings.
 
 `ArchiveMetadata` is coordinator-side graph metadata containing the archive ID, optional dataset,
@@ -170,9 +168,11 @@ is logged without replacing the original lifecycle error.
 ## 5. Recovery
 
 At startup, the coordinator selects query jobs whose status is `RUNNING` and whose `spider_id` is
-not null. It constructs a handle with only the common lifecycle dependencies and calls `recover`
-with the persisted Spider ID. Recovery does not require a resource group, query options, output
-handle, archive metadata, or execution policies, and it never registers a second graph.
+not null. It constructs a handle through the same `new()` API used for new jobs and calls `recover`
+with the persisted Spider ID. Construction requires the resource group, query options, output
+handle, and archive/policy vector even for recovery. The recovery path does not read or validate
+these submission inputs and never registers a second graph. This constructor requirement follows
+the compression handle's pattern; it does not mean recovery must reselect archives or resubmit work.
 
 `recover` calls the same idempotent start-and-poll operation used after new submission, then applies
 the same terminal mapping. Repeating recovery after a transport or SQL failure is safe because the
@@ -204,6 +204,7 @@ Handler tests must cover:
 - A lost pending compare-and-set without failure-state overwrite.
 - Submission failures and best-effort pre-running failure reporting.
 - Polling and terminal-persistence failures leaving a durable job `RUNNING`.
-- Recovery without submission inputs and without graph registration.
+- Recovery using only the persisted Spider ID after handle construction, without reading the
+  stored submission inputs or registering a graph.
 - Idempotent recovery of running and already-terminal Spider jobs.
 - Failure to retrieve Spider's error string while preserving a terminal CLP failure.

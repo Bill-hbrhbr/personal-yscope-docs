@@ -48,14 +48,9 @@ Address handler/RFC differences in the already-open #2513 rather than creating a
 for reconciliation. Integration must use the final shared and worker contracts, not stacked
 placeholder versions of the task or output handle.
 
-Known differences from the target job-handler RFC:
-
-- #2513 stores a `QueryPlan` and resource group in the handle and uses `run(self)`; the RFC passes
-  submission inputs to `run` and does not require them for recovery.
-- Its polling configuration is named `SpiderOption`, rather than the RFC's `SpiderPollingOption`.
-- It checks task-count range but does not reject an empty archive vector before submission.
-- Pre-running failure reporting allows updates to both `PENDING` and `RUNNING`; the RFC restricts
-  this path to `PENDING` and preserves durable running work for recovery.
+The implementation now uses the established `SpiderOption` name, rejects an empty archive vector
+before registration, and restricts pre-running failure reporting to `PENDING`. These behaviors align
+the opened PR with this RFC; remaining graph-submission work is tracked separately below.
 
 Keep these as explicit reconciliation work, not silently revised requirements or claims that the
 opened PR already matches the RFC. The result-limit difference between Zhihao's planning document
