@@ -50,14 +50,14 @@ and #2512 is recorded in the [worker overview](query-worker-execution-overview.m
 
 ### Yet to be opened
 
-A–D are roadmap labels, not assigned GitHub PR numbers.
+PR numbers are placeholders until opened. A–D identify the planned work in the dependency diagram.
 
-| Planned PR | What it delivers | Proposed dependencies |
-| --- | --- | --- |
-| A — Graph submission | Serialize archive-task inputs, attach policies, and register a Spider graph. | #2504 and #2512's final task/output contract. |
-| B — Admission and archive planning | Validate jobs and prepare dataset/archive pairs, options, policies, and result destinations. | #2504 and #2512's output-handle types. |
-| C — Coordinator service and recovery | Integrate polling, concurrency, handlers, startup recovery, and shutdown. | A, B, and #2513. |
-| D — Deployment and end-to-end integration | Package and deploy the service; verify worker access, scheduler cutover, and the complete query path. | C and #2509's retry-safe result behavior. |
+| PR | Planned change | What it delivers | Proposed dependencies |
+| --- | --- | --- | --- |
+| #TBD | A — Graph submission | Serialize archive-task inputs, attach policies, and register a Spider graph. | #2504 and #2512's final task/output contract. |
+| #TBD | B — Admission and archive planning | Validate jobs and prepare dataset/archive pairs, options, policies, and result destinations. | #2504 and #2512's output-handle types. |
+| #TBD | C — Coordinator service and recovery | Integrate polling, concurrency, handlers, startup recovery, and shutdown. | A, B, and #2513. |
+| #TBD | D — Deployment and end-to-end integration | Package and deploy the service; verify worker access, scheduler cutover, and the complete query path. | C and #2509's retry-safe result behavior. |
 
 #### A — Graph submission
 
