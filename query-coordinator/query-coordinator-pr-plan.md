@@ -73,8 +73,9 @@ spawning, and startup/shutdown.
   Editing `CREATE TABLE IF NOT EXISTS` alone does not upgrade an existing table.
 - Keep reconstructible local phases out of the durable schema.
 
-This work depends on #2513 and task-input preparation. Prototype code in the archived roadmap is
-reference material, not proof these pieces are integrated into the seven opened PRs.
+This work depends on #2513 and can proceed in parallel with task-input preparation. Prototype code
+in the archived roadmap is reference material, not proof these pieces are integrated into the seven
+opened PRs.
 
 #### C — End-to-end integration
 
@@ -130,8 +131,7 @@ flowchart TD
     P2521 -.->|"Submission interface"| A
 
     P2513 -.-> B
-    A -.-> B
-
+    A -.-> C
     B -.-> C
     P2512 -.->|"Search worker"| C
     P2521 -.->|"Graph submission"| C
