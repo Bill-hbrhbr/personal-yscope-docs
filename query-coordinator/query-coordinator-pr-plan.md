@@ -5,7 +5,7 @@
 - [MVP+2: timeline aggregation](query-mvp-plus-2-aggregation.md) — changes after MVP+1.
 
 This roadmap distinguishes approved work, opened work still in progress, and PRs yet to be opened.
-Review states and dependency hints were checked on 2026-09-08. All six existing PRs are unmerged.
+Review states and dependency hints were checked on 2026-09-12. All seven existing PRs are unmerged.
 Stacked diffs include prerequisite changes and must not be counted as independent delivery.
 
 ## MVP
@@ -26,63 +26,57 @@ Release timing, prerequisite merges, and repository checks remain separate requi
 | PR | What it delivers | Dependencies | Review / merge notes |
 | --- | --- | --- | --- |
 | [#2509](https://github.com/y-scope/clp/pull/2509) | Result deduplication, result-consumer updates, and result-cache garbage collection changes. | No prerequisite PR declared; needed for the integrated retry-safe MVP. | Changes requested; a later comment approves the web UI portion, not the full PR. |
-| [#2512](https://github.com/y-scope/clp/pull/2512) | Registered archive-search worker, output-handle variants, and clp-s execution. | #2503 and #2508, explicitly stated in the PR body. | Awaiting review; no submitted reviews at the snapshot. Does not construct Spider graphs. |
+| [#2512](https://github.com/y-scope/clp/pull/2512) | Registered archive-search worker, output-handle variants, and clp-s execution. | #2503 and #2508, explicitly stated in the PR body. | Changes requested; review discussion is ongoing. Does not construct Spider graphs. |
 | [#2513](https://github.com/y-scope/clp/pull/2513) | Job lifecycle, SQL persistence, and Spider start/poll/recovery support. | #2504's submitter interface; inferred from the implementation, not explicitly numbered in the body. | Draft, with changes requested. Graph construction is explicitly deferred. |
+| [#2521](https://github.com/y-scope/clp/pull/2521) | Spider graph submission with one independent archive-search task per selected archive. | #2504, explicitly stated in the PR body; integrates with #2512's final worker contract. | Formal PR with changes requested. Lifecycle management remains in #2513. |
 
 ### Remaining work
 
-#2513's handler/RFC reconciliation is complete. The four #TBD entries require new PRs; A–D match the
-dependency diagram below. Each item's checklist appears once beneath this table.
+The three #TBD entries require new PRs; A–C match the dependency diagram below. Each item's
+checklist appears once beneath this table.
 
 | PR | Work item | Delivery |
 | --- | --- | --- |
-| #TBD | A — Graph submission | New PR |
-| #TBD | B — Admission and archive planning | New PR |
-| #TBD | C — Coordinator service and recovery | New PR |
-| #TBD | D — Deployment and end-to-end integration | New PR |
+| #TBD | A — Query task-input preparation | New PR |
+| #TBD | B — Coordinator loop and executable | New PR |
+| #TBD | C — End-to-end integration | New PR |
 
-#### A — Graph submission
+#### A — Query task-input preparation
 
-Replace the submitter placeholder with one `query::clp_s_search` node per prepared archive.
+[Coordinator planning](query-coordinator-planning-design.md) defines the selection behavior and
+configuration inputs. Implement that preparation inside `QueryJobHandle::prepare_task_inputs()`.
 
-- Serialize the exact task argument order and wire representation from the TDL RFC.
-- Attach each archive's execution policy and the appropriate resource group.
-- Register without starting; the handler persists the Spider ID before execution starts.
-- Do not add a join, query commit, or termination task.
-- Keep registration ambiguity visible; do not automatically register replacement graphs after
-  uncertain responses.
-
-This work consumes the shared/worker contract and submitter interface. It is distinct from #2512.
-
-#### B — Admission and archive planning
-
-[Coordinator planning](query-coordinator-planning-design.md) defines the target boundary.
-
-- Read and decode query configuration; categorize supported jobs before claiming them.
-- Validate inputs and prepare dataset/archive pairs using time and retention filters.
+- Use the SQL-row configuration passed into the handle to derive job-wide query options.
+- Validate inputs and select dataset/archive pairs using time and retention filters.
 - Resolve the persisted result-limit compatibility contract.
-- Prepare job-wide options, result destination, collection/index setup, and per-archive policies.
-- Complete valid zero-archive queries directly in MySQL.
-- Define exclusive ownership with the legacy scheduler.
+- Prepare the result destination, collection/index setup, archive metadata, and per-archive policies.
+- Complete valid zero-archive queries successfully inside the handle without registering a Spider
+  graph.
+- Submit nonempty prepared inputs through #2521's submitter interface.
 
-Graph construction and preparation can be developed against their shared interface, then integrated.
+This work depends on #2513 and integrates with #2521. It does not construct task descriptors or
+serialize task inputs.
 
-#### C — Coordinator service and recovery
+#### B — Coordinator loop and executable
 
-Integrate configuration, database credentials, resource-group setup, admission/polling, concurrency,
-handler spawning, and binary startup/shutdown.
+Add the query equivalent of the compression coordinator's `coordination.rs` and executable. Integrate
+configuration, database credentials, resource-group setup, admission polling, concurrency, handler
+spawning, and startup/shutdown.
 
+- Read pending query rows, decode their configurations, categorize supported jobs, and construct
+  handles without claiming unsupported job types.
 - Discover running rows with durable Spider IDs and reattach without rebuilding graphs.
 - Include recovered jobs in concurrency accounting and track handles during shutdown.
 - Preserve running state after observation or terminal-persistence failures.
+- Define exclusive ownership with the legacy scheduler.
 - Add an existing-database migration or explicitly limit initial deployment to fresh databases.
   Editing `CREATE TABLE IF NOT EXISTS` alone does not upgrade an existing table.
 - Keep reconstructible local phases out of the durable schema.
 
-Prototype code in the archived roadmap is reference material, not proof these pieces are integrated
-into the six opened PRs.
+This work depends on #2513 and task-input preparation. Prototype code in the archived roadmap is
+reference material, not proof these pieces are integrated into the seven opened PRs.
 
-#### D — Deployment and end-to-end integration
+#### C — End-to-end integration
 
 Exercise successful search, no selected archives, no log matches, invalid configuration, unsupported
 categories, retry/deduplication, partial failure, lost SQL transitions, and restart at registration,
@@ -116,35 +110,37 @@ flowchart TD
         P2509["#2509: Result deduplication"]
         P2512["#2512: Search worker"]
         P2513["#2513: Job lifecycle"]
+        P2521["#2521: Graph submission"]
     end
 
     subgraph Planned["Yet to be opened"]
-        A["A: Graph submission"]
-        B["B: Admission and archive planning"]
-        C["C: Coordinator service and recovery"]
-        D["D: Deployment and end-to-end integration"]
+        A["A: Query task-input preparation"]
+        B["B: Coordinator loop and executable"]
+        C["C: End-to-end integration"]
     end
 
     P2503 --> P2504
     P2503 --> P2512
     P2508 --> P2512
     P2504 -->|"Submitter interface"| P2513
+    P2504 --> P2521
+    P2512 -.->|"Final worker contract"| P2521
 
-    P2504 -.-> A
-    P2512 -.->|"Final task and output contract"| A
-    P2504 -.-> B
-    P2512 -.->|"Output-handle types"| B
+    P2513 -.-> A
+    P2521 -.->|"Submission interface"| A
 
-    A -.-> C
+    P2513 -.-> B
+    A -.-> B
+
     B -.-> C
-    P2513 -.-> C
-
-    C -.-> D
-    P2509 -.->|"Retry-safe results"| D
+    P2512 -.->|"Search worker"| C
+    P2521 -.->|"Graph submission"| C
+    P2509 -.->|"Retry-safe results"| C
 ```
 
-#2509 is not a declared prerequisite of #2512. It is shown as an integration requirement for
-retry-safe results, rather than inventing a worker-PR dependency absent from the PR body.
+#2512 is not a declared prerequisite of #2521 because #2521 is based on #2504, but its final task
+and output contract is required for integration. #2509 is likewise shown only as an end-to-end
+requirement for retry-safe results.
 
 ## MVP+1: cancellation
 
